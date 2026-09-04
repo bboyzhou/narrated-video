@@ -1,0 +1,4 @@
+interface:
+  display_name: "图片运镜解说视频"
+  short_description: "从文案到可选风格的解说视频，先确认改写稿与样片，再增量制作全片"
+  default_prompt: "用 $narrated-video 将这段文案制作成图片运镜解说视频，先确认解说稿，再制作 Demo。"

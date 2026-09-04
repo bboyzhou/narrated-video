@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.narrated-video/
+deliverables/
+*.mp4
+*.wav
+*.mp3
+*.mkv
+*.png
