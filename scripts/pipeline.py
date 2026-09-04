@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import time
+import unicodedata
 import wave
 from runtime import resolve_paths, validate_paths, relaunch, path_report, doctor, update_config
 
@@ -51,6 +52,41 @@ def read_json(path):
 
 def compact(text):
     return re.sub(r'\s+', '', text)
+
+
+def char_units(ch):
+    """Approximate rendered width in half-em units for deterministic wrapping."""
+    if ch.isspace():
+        return 1
+    east = unicodedata.east_asian_width(ch)
+    return 2 if east in ('W', 'F', 'A') else 1
+
+
+def wrap_caption(text, max_units):
+    """Wrap captions by approximate pixel width, preferring natural punctuation."""
+    text = re.sub(r'\s+', ' ', text).strip()
+    lines = []
+    rest = text
+    breaks = set('，。！？；：、,。!?;:')
+    while rest:
+        used = 0
+        end = 0
+        candidates = []
+        for i, ch in enumerate(rest):
+            nxt = used + char_units(ch)
+            if nxt > max_units:
+                break
+            used = nxt
+            end = i + 1
+            if ch in breaks:
+                candidates.append(end)
+        if end == len(rest):
+            lines.append(rest)
+            break
+        cut = candidates[-1] if candidates else end
+        lines.append(rest[:cut].rstrip())
+        rest = rest[cut:].lstrip()
+    return lines
 
 
 def run(command, cwd=None):
@@ -109,7 +145,16 @@ class Project:
         positions = [list(self.shots).index(s) for s in demo]
         require(positions == list(range(positions[0], positions[0] + len(positions))), 'Demo shots must be consecutive and ordered')
         voice = c['voice']
-        require(voice['engine'] in ('files', 'melotts'), 'voice.engine must be files or melotts')
+        require(voice['engine'] in ('files', 'melotts', 'cosyvoice'), 'voice.engine must be files, melotts or cosyvoice')
+        if voice['engine'] == 'cosyvoice':
+            require(voice.get('provider', 'cosyvoice').lower() == 'cosyvoice', 'cosyvoice engine requires provider=cosyvoice')
+            require(isinstance(voice.get('command'), list) and voice['command'],
+                    'CosyVoice requires voice.command: an argv list with {text_file} and {output} placeholders')
+            require('{output}' in voice['command'] and ('{text_file}' in voice['command'] or '{text}' in voice['command']),
+                    'CosyVoice command must include {output} and {text_file} or {text}')
+            require(voice.get('model') and voice.get('model_path'), 'CosyVoice requires model and model_path')
+            require(voice.get('license'), 'CosyVoice requires model license notes')
+            require(self.path_for(voice['model_path']).exists(), 'CosyVoice model_path unavailable: ' + str(voice['model_path']))
         require(0.1 <= voice.get('speed', 1) <= 3, 'voice.speed must be 0.1..3')
         sub = c['subtitles']
         require(re.fullmatch(r'[\w -]+', sub['font'], re.UNICODE), 'Use a plain font family name')
@@ -124,6 +169,8 @@ class Project:
             require(0 <= music.get('volume', 0.15) <= 1, 'Music volume must be 0..1')
             require(music.get('fade_in', 1) >= 0 and music.get('fade_out', 1) >= 0, 'Negative music fade')
             require(music.get('source') and music.get('license'), 'Music needs source and license notes')
+        mix = c.get('mix', {})
+        require(-30 <= float(mix.get('music_relative_db', -12)) <= 0, 'music_relative_db must be -30..0 dB')
 
     def selected(self, stage):
         return [self.shots[s] for s in self.c['demo']['shots']] if stage == 'demo' else self.c['shots']
@@ -147,6 +194,7 @@ class Project:
                        'output': self.output, 'subtitles': self.c['subtitles'], 'shots': shots, 'demo': self.c['demo'],
                        'images': [self.asset(s['asset']) for s in shots], 'voices': voices,
                        'music': [(m, self.asset(m['path'])) for m in self.c.get('music', [])],
+                       'mix': self.c.get('mix', {}),
                        'runtime': self.c.get('runtime', {}),
                        'renderer': [file_hash(__file__), file_hash(Path(__file__).with_name('runtime.py'))]})
 
@@ -204,10 +252,27 @@ class Project:
                 p = self.path_for(sentence['audio'])
                 require(p.is_file(), 'Missing audio: ' + str(p))
             else:
-                require(self.c['voice']['engine'] == 'melotts', 'Missing per-sentence WAV for ' + sid)
+                require(self.c['voice']['engine'] in ('melotts', 'cosyvoice'), 'Missing per-sentence WAV for ' + sid)
                 config = self.c['voice']
                 def synthesize(target):
                     nonlocal model
+                    if config['engine'] == 'cosyvoice':
+                        text_file = target.with_suffix('.txt')
+                        text_file.write_text(sentence['text'], encoding='utf-8')
+                        argv = []
+                        for arg in config['command']:
+                            value = str(arg)
+                            value = value.replace('{text_file}', str(text_file)).replace('{output}', str(target))
+                            value = value.replace('{model_path}', str(self.path_for(config['model_path'])))
+                            value = value.replace('{text}', sentence['text'])
+                            argv.append(value)
+                        try:
+                            run(argv, cwd=str(self.root))
+                        finally:
+                            text_file.unlink(missing_ok=True)
+                        require(target.is_file() and target.stat().st_size > 0,
+                                'CosyVoice command did not create a WAV: ' + str(target))
+                        return
                     if model is None:
                         try:
                             # g2p_en imports may otherwise attempt implicit NLTK downloads.
@@ -314,7 +379,8 @@ class Project:
             offset = self.c['demo']['start_seconds']
         args = ['-filter_complex_threads', '1', '-i', joined]
         sub = self.c['subtitles']
-        size = sub.get('size', 24) * h / 720
+        mix = self.c.get('mix', {})
+        size = self._subtitle_effective_size * h / 720
         # SRT rendering uses libass PlayResY=288; convert pixel target to ASS units.
         vf = f"subtitles=filename=captions.srt:force_style='FontName={sub['font']},FontSize={size*288/h},Outline=1,Shadow=0,Alignment=2,MarginV={sub.get('margin', 28)*288/720}'" if sub.get('enabled', True) else 'null'
         filters = [f'[0:v]{vf}[v]', '[0:a]loudnorm=I=-18:TP=-2:LRA=7,aresample=48000,asplit=2[voice][key]']
@@ -327,15 +393,19 @@ class Project:
             args += ['-stream_loop', '-1', '-i', self.path_for(m['path'])]
             length = m['end'] - m['start']
             fi, fo = min(m.get('fade_in', 1), length), min(m.get('fade_out', 1), length)
-            filters += [f'[{idx}:a]aresample=48000,aformat=channel_layouts=stereo,atrim=duration={length},asetpts=PTS-STARTPTS,volume={m.get("volume", .15)},afade=t=in:d={fi},afade=t=out:st={length-fo}:d={fo},atrim=start={start-m["start"]}:end={end-m["start"]},asetpts=PTS-STARTPTS,adelay={round((start-offset)*1000)}:all=1,apad,atrim=duration={total}[m{idx}]']
+            track_volume = float(m.get('volume', .22))
+            if mix.get('music_adaptive', True):
+                track_volume *= 10 ** ((float(mix.get('music_relative_db', -12)) + 12) / 20)
+            track_volume = min(max(track_volume, 0.0), 1.0)
+            filters += [f'[{idx}:a]aresample=48000,aformat=channel_layouts=stereo,atrim=duration={length},asetpts=PTS-STARTPTS,volume={track_volume},afade=t=in:d={fi},afade=t=out:st={length-fo}:d={fo},atrim=start={start-m["start"]}:end={end-m["start"]},asetpts=PTS-STARTPTS,adelay={round((start-offset)*1000)}:all=1,apad,atrim=duration={total}[m{idx}]']
             music_labels.append(f'[m{idx}]')
         if music_labels:
             filters += [''.join(music_labels) + f'amix=inputs={len(music_labels)}:normalize=0[music]',
-                        '[music][key]sidechaincompress=threshold=0.03:ratio=3:attack=15:release=400[duck]',
+                        '[music][key]sidechaincompress=threshold=0.06:ratio=2:attack=15:release=400[duck]',
                         '[voice][duck]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.89:level=false:latency=true[a]']
         else:
             filters += ['[key]anullsink', '[voice]anull[a]']
-        final = self.cached('final', [file_hash(joined), file_hash(srt), self.c['music'],
+        final = self.cached('final', [file_hash(joined), file_hash(srt), self.c['music'], self.c.get('mix', {}),
                                     [self.asset(m['path']) for m in self.c['music']], self.c['subtitles'], offset], '.mp4',
                             lambda p: self.ff(args + ['-filter_complex', ';'.join(filters), '-map', '[v]', '-map', '[a]',
                                                      '-t', total, '-r', fps, '-c:v', 'libx264', '-preset', 'fast', '-crf', '19',
@@ -360,12 +430,24 @@ class Project:
             return f'{ms//3600000:02}:{ms//60000%60:02}:{ms//1000%60:02},{ms%1000:03}'
         entries = []
         limit = self.c['subtitles'].get('max_chars', 24)
+        # max_chars remains a user-facing 720p readability target; wrapping uses
+        # approximate glyph width so mixed CJK/Latin text does not split blindly.
+        max_units = limit * 2
+        max_line_units = 0
         for i, row in enumerate(timeline, 1):
             text = re.sub(r'\s+', ' ', row['text']).strip()
             require(len(text) <= limit * 2, f'{row["id"]}: subtitle exceeds two lines; split narration at real spoken boundaries and reapprove')
             # Both lines retain the same native sentence interval; no guessed word times.
-            lines = '\n'.join(text[j:j+limit] for j in range(0, len(text), limit))
+            wrapped = wrap_caption(text, max_units)
+            max_line_units = max(max_line_units, *(sum(char_units(ch) for ch in line) for line in wrapped))
+            lines = '\n'.join(wrapped)
             entries.append(f'{i}\n{stamp(row["start_frame"])} --> {stamp(row["end_frame"])}\n{lines}\n')
+        sub = self.c['subtitles']
+        base_size = float(sub.get('size', 48))
+        width_ratio = float(sub.get('max_width_ratio', 0.88))
+        safe_width = self.output['width'] * max(0.6, min(width_ratio, 0.95))
+        fitted = base_size if not max_line_units else (safe_width * 2 / max_line_units)
+        self._subtitle_effective_size = max(float(sub.get('min_size', 28)), min(base_size, fitted))
         return '\n'.join(entries)
 
     def verify(self, stage):
@@ -384,9 +466,21 @@ class Project:
             self.ff(['-ss', frame/self.fps, '-i', artifact, '-frames:v', '1', '-update', '1', p])
             require(p.is_file(), 'Failed to extract verification frame')
             samples.append(str(p))
+        music_checks = []
+        for m in self.c.get('music', []):
+            mp = self.path_for(m['path'])
+            # volumedetect reports mean level at info verbosity; the regular ff
+            # wrapper intentionally hides it, so probe this read-only check directly.
+            probe = run([self.ffmpeg, '-hide_banner', '-loglevel', 'info', '-nostdin', '-i', mp,
+                         '-af', 'volumedetect', '-f', 'null', '-'])
+            match = re.search(r'mean_volume:\s*(-?[0-9.]+) dB', probe.stderr)
+            mean_db = float(match.group(1)) if match else None
+            music_checks.append({'path': str(mp), 'configured_volume': m.get('volume', .22),
+                                 'source_mean_db': mean_db,
+                                 'audibility_warning': m.get('volume', .22) < .15})
         report = {'decode_passed': True, 'decoded_frames': frames[-1], 'duration_seconds': frames[-1]/self.fps,
                   'timeline_contiguous': True, 'sample_frames': samples, 'visual_review': 'pending agent/user review',
-                  'listening_review': 'pending agent/user review', 'cache': self.stats}
+                  'listening_review': 'pending agent/user review', 'music_checks': music_checks, 'cache': self.stats}
         write_json(destination / (stage + '-verification.json'), report)
         return report
 
@@ -410,7 +504,7 @@ def initialize(path, source):
                       'style': {'name': 'custom', 'visual': '', 'tone': ''},
                       'output': {'width': 1280, 'height': 720, 'fps': 30},
                       'voice': {'engine': 'melotts', 'language': 'ZH', 'speaker': 'ZH', 'device': 'cpu', 'speed': 1, 'revision': '1'},
-                      'subtitles': {'enabled': True, 'font': 'Microsoft YaHei', 'size': 24, 'margin': 28, 'max_chars': 24},
+                      'subtitles': {'enabled': True, 'font': 'Microsoft YaHei', 'size': 48, 'min_size': 28, 'max_width_ratio': 0.88, 'margin': 30, 'max_chars': 24},
                       'narration': [], 'shots': [], 'demo': {'shots': []}, 'music': []})
     print('Created ' + str(path) + '; prepare and approve the spoken script before production.')
 

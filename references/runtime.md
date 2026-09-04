@@ -15,7 +15,7 @@ python $pipeline configure $project --python 'D:/tools/MeloTTS/.venv/Scripts/pyt
 python $pipeline doctor $project
 ```
 
-`configure` 记录选择，不代替用户做选择；只验证文件/目录存在，不导入模型或下载资源。后续 CLI 会自动使用所选 Python，并在导入 NLTK、Transformers、MeloTTS **之前**注入项目资源路径。即使最初用另一套 Python 启动，也会转到配置的解释器执行。直接在其他程序中 `import Project` 不会自动重启解释器，需调用方使用已配置环境，推荐使用 CLI。
+`configure` 记录选择，不代替用户做选择；只验证文件/目录存在，不导入模型或下载资源。后续 CLI 会自动使用所选 Python，并在导入 NLTK、Transformers、MeloTTS 或 CosyVoice 原生推理脚本**之前**注入项目资源路径。即使最初用另一套 Python 启动，也会转到配置的解释器执行。直接在其他程序中 `import Project` 不会自动重启解释器，需调用方使用已配置环境，推荐使用 CLI。
 
 ```json
 "runtime": {
@@ -35,7 +35,7 @@ python $pipeline doctor $project
 - `hf_hub_cache` 对应 `HF_HUB_CACHE`；`transformers_cache` 对应 `TRANSFORMERS_CACHE`。显式项目值优先于进程环境变量，未配置的字段保留原环境行为。
 - FFmpeg 优先级：本次 `--ffmpeg` > 项目 `runtime.ffmpeg` > `FFMPEG` > PATH。显式路径无效就报错，不静默回退；临时覆盖不会更新已保存路径，正式换环境应通过 configure。
 - 新建项目 `offline: true`，设置 Hugging Face 和 Transformers 离线模式。`false` 仅表示允许相关库联网，不能视为安装或下载授权。旧项目没有 runtime 时保持原启动方式，agent 在下一次使用前补做用户路径选择。
-- `doctor` 使用所选 Python，检查 FFmpeg 可运行、MeloTTS 模块可定位、NLTK zip 可找到且词典可读取。使用 files 配音时跳过 MeloTTS/NLTK 检查。模型目录存在不等于模型齐全，doctor 不导入整个模型、不生成音频；完整验证需要已有授权下的短句合成。
+- `doctor` 使用所选 Python，检查 FFmpeg 可运行、MeloTTS 模块可定位、NLTK zip 可找到且词典可读取。使用 `files` 或 `cosyvoice` 配音时跳过 MeloTTS/NLTK 检查；CosyVoice 的 `command` 和模型权重由用户选择，首次使用必须运行一条获授权的短句试听来验证原生环境和输出 WAV。模型目录存在不等于模型齐全，doctor 不导入整个模型、不生成音频。
 - 字体继续使用 `subtitles.font` 的已安装字体名称；首版不自动安装字体、不支持单独字体文件路径。
 - runtime 变化会使 Demo 批准和缓存失效，避免换解释器或资源后误用旧配音。模型在原位置更新时仍需递增 `voice.revision`。不会修改用户/系统级环境变量。
 - 2026-09 版本把 script fingerprint 限定为有序的句子 ID 和文字，不再把逐句 `audio` 路径误算成文案变化。升级已有项目后，若旧 state 使用旧算法，首次继续时可能要求用原有实际回复重新记录一次 script 批准；之后仅补充非 Demo 音频不会撤销文案批准。

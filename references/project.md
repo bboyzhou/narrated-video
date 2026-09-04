@@ -1,6 +1,6 @@
 # 项目配置及命令
 
-脚本位置：本 skill 的 `scripts/pipeline.py`。使用现有 Python 3.10+，仅标准库；渲染需要带 libx264、libass、xfade、loudnorm 的 FFmpeg。配音生成需要已有 MeloTTS Python 环境。首次使用先由用户选择软件和资源路径，不自动安装包。
+脚本位置：本 skill 的 `scripts/pipeline.py`。使用现有 Python 3.10+，仅标准库；渲染需要带 libx264、libass、xfade、loudnorm 的 FFmpeg。配音生成需要已有 MeloTTS 或 CosyVoice 原生推理环境；也可直接使用逐句 WAV。首次使用先由用户选择软件和资源路径，不自动安装包。
 
 软件和资源路径的首次选择、字段优先级及诊断见 [运行环境](runtime.md)。同一项目路径已选定且有效时直接复用。
 
@@ -47,7 +47,7 @@ Demo 未批准时，`tts/render --stage full` 拒绝执行；Demo 模式只处�
   "style": {"name": "水墨", "visual": "留白与统一墨色", "tone": "自然沉稳"},
   "output": {"width": 1280, "height": 720, "fps": 30},
   "voice": {"engine": "melotts", "language": "ZH", "speaker": "ZH", "device": "cpu", "speed": 0.95, "revision": "1"},
-  "subtitles": {"enabled": true, "font": "Microsoft YaHei", "size": 24, "margin": 28, "max_chars": 24},
+  "subtitles": {"enabled": true, "font": "Microsoft YaHei", "size": 48, "min_size": 28, "max_width_ratio": 0.88, "margin": 30, "max_chars": 24},
   "narration": [
     {"id": "N001", "text": "故事从这里开始。"},
     {"id": "N002", "text": "接下来，我们走近这段历史。"}
@@ -58,8 +58,9 @@ Demo 未批准时，`tts/render --stage full` 拒绝执行；Demo 模式只处�
   ],
   "demo": {"shots": ["S001", "S002"]},
   "music": [
-    {"path": "music/track.mp3", "start": 0, "end": 30, "volume": 0.15, "fade_in": 2, "fade_out": 3, "source": "实际来源链接或用户提供记录", "license": "实际许可及署名要求"}
+    {"path": "music/track.mp3", "start": 0, "end": 30, "volume": 0.22, "fade_in": 2, "fade_out": 3, "source": "实际来源链接或用户提供记录", "license": "实际许可及署名要求"}
   ]
+  ,"mix": {"music_adaptive": true, "music_relative_db": -12}
 }
 ```
 
@@ -68,18 +69,22 @@ Demo 未批准时，`tts/render --stage full` 拒绝执行；Demo 模式只处�
 ### 配音和时间轴
 
 - `voice.engine` 为 `melotts` 或 `files`。每句可提供 `audio: "audio/N001.wav"` 覆盖 TTS，必须为非空 PCM WAV。只有整段录音时，先取得可靠分句对齐，再用实际边界切成逐句 WAV；不支持按字数猜时间。
+- 人声选择先询问场景、性别呈现、年龄感、粗犷/细腻、沉稳/激昂和语速，列出可试听的 MeloTTS speaker、本地 WAV 或有明确授权的在线候选；用户试听选定后才生成或下载。记录候选试听链接、许可、选择原话和哈希；不得从影视/名人音频推断或克隆身份。MeloTTS 的音色描述只是偏好，不能保证实际模型表现。
+- 可选择开源人声模型。配置中记录模型名、版本、模型路径、推理 Python/运行时、许可证和试听样本；已有适配器的模型直接生成逐句 PCM WAV，未适配模型先由其原生工具生成 WAV，再设置 `voice.engine: files` 和每句 `audio` 路径接入本 pipeline。不要把未验证的模型名写成已支持的 `voice.engine`。
+- CosyVoice 通过 `voice.engine: "cosyvoice"` 接入。它使用用户选择的原生推理命令逐句生成 WAV，不自动安装依赖或下载权重。`voice.command` 是 argv 数组，必须包含 `{text_file}`（UTF-8 文本临时文件）或 `{text}`，以及 `{output}`（目标 WAV），例如 `["D:/envs/cosyvoice/python.exe", "tools/infer.py", "--model", "{model_path}", "--text-file", "{text_file}", "--output", "{output}"]`；实际命令需按所选 CosyVoice 版本调整。配置还需有 `provider: "cosyvoice"`、`model`、`model_path`、`license` 和 `revision`。先用同一段文案生成试听样本，用户选定后再进入 Demo。
 - 本地 MeloTTS 的 speaker 名称须存在于模型，常用中文为 `ZH`。`revision` 用于本地模型/权重更新后的主动缓存失效，更新模型后递增它。MeloTTS 可能在模型未缓存时联网获取模型；无下载授权时先确认现有环境和模型缓存齐全。
 - MeloTTS 的 g2p_en 导入可能触发 NLTK 数据下载，脚本先检查 `cmudict.zip` 和 `averaged_perceptron_tagger.zip`。查找失败时显示搜索路径，先让用户选择 `runtime.nltk_data` 指向已有资源，不能据此判断机器没有安装；仅在确认需要新增资源后征得下载授权。不通过关闭网络安全检查解决。
 - 每句 WAV 以真实样本数测量时长，再向上对齐整数视频帧，只在句尾补不足一帧的静音，不裁掉讲话。时间轴和 SRT 使用这些帧边界。因此长片总时长可能比原 WAV 时长之和多出少量补齐时间。
 - 一个镜头可引用多句，必须按原顺序完整覆盖所有句子一次，不允许重复、漏句、重排。ID 仅用英文字母、数字、下划线、短横线。
-- 字幕每句一个时间区间，可折成两行，不伪造逐字时间。单句超过 `2 * max_chars` 时需在真实口播停顿处分句，更新批准稿/分句审批后重跑。size、margin 是 720p 参考像素值，随分辨率缩放；移动端预览通常从 32px（720p）起步，再以抽帧确认可读性。每句字幕不得跨越不对应的镜头。
+- 字幕每句一个时间区间，可折成两行，不伪造逐字时间。单句超过 `2 * max_chars` 时需在真实口播停顿处分句，更新批准稿/分句审批后重跑。`size` 是字号上限，脚本根据输出宽度、`max_width_ratio` 安全区和最长一行的近似字形宽度自动拟合，且不低于 `min_size`；移动端 720p 可将上限设为 48px。每句字幕不得跨越不对应的镜头。
 
 ### 运镜、转场及 Demo
 
 - `motion`：`still`、`push`、`pull`、`pan-left`、`pan-right`。推拉幅度 6%，平移保持轻度裁切；输入按画幅裁切填满。
 - `transition` 是该镜头到下一镜头的叠化秒数，`0` 表示硬切，范围 0–2 秒，须短于相邻两镜头。脚本额外生成运镜尾帧，与下一镜头开头叠化；不压缩解说、不累积提前切镜。
 - `demo.shots` 是连续镜头 ID 列表，20–40 秒是创作建议，非硬编码限制。中段 Demo 需设置 `demo.start_seconds`，用于在全片音乐时间轴上截取相同段落。制作 Demo 前可依据文案估算该位置，完成全片真实配音后必须核对；如音乐听感改变，更新 Demo 并重新确认。
-- `music` 为多段音轨，可重叠；不足长度自动循环，分别淡入淡出，并依据解说进行 sidechain ducking。start/end 使用全片秒数。每个项目先询问创作者音乐意图，再检索至少 3 个候选并让创作者试听；明确选择后才下载和写入 `music`。候选阶段只记录在 `music-selection.json`，不要把未批准音频放入项目。记录预览链接、下载地址、许可、用户选择原话和 SHA-256，避免跨项目无意复用同一曲目。解说统一响度至目标 -18 LUFS，混音加峰值限制器，最终仍需试听成片。
+- `music` 为多段音轨，可重叠；不足长度自动循环，分别淡入淡出，并依据解说进行 sidechain ducking。start/end 使用全片秒数；默认线性增益约为 `0.22`，史诗类音乐可在试听后按听感调整。每个项目先询问创作者音乐意图，再检索至少 3 个候选并让创作者试听；明确选择后才下载和写入 `music`。候选阶段只记录在 `music-selection.json`，不要把未批准音频放入项目。记录预览链接、下载地址、许可、用户选择原话和 SHA-256，避免跨项目无意复用同一曲目。验证报告包含音乐源平均响度和低音量警告；解说统一响度至目标 -18 LUFS，混音加峰值限制器，最终仍需试听成片。
+- `mix.music_relative_db` 是相对配音的音乐大小选择：`-18` 安静、`-12` 平衡、`-8` 突出；`music_adaptive: true` 时脚本将该值换算为所有音乐段的统一增益，并保留 sidechain ducking。用户应先选相对大小，再试听 Demo 微调。
 
 ### 增量与验证
 
