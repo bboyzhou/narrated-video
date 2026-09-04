@@ -20,6 +20,18 @@ from runtime import resolve_paths, validate_paths, relaunch, path_report, doctor
 
 VERSION = 1
 
+# High-risk readings frequently encountered in Chinese narration.  This is a
+# review prompt, not an automatic rewrite: context still decides the reading.
+POLYPHONE_HINTS = {
+    '率军': '率(shuài)军', '统率': '统(shuài)率', '概率': '概(lǜ)率',
+    '长安': '长(cháng)安', '成长': '成(zhǎng)', '行军': '行(xíng)军',
+    '银行': '银(háng)行', '乐府': '乐(yuè)府', '音乐': '音(yīn)乐(yuè)',
+    '重兵': '重(zhòng)兵', '重复': '重(chóng)复', '将领': '将(jiàng)领',
+    '将军': '将(jiàng)军', '朝廷': '朝(cháo)廷', '朝夕': '朝(zhāo)夕',
+    '破敌': '破(pò)敌', '敌军': '敌(dí)军',
+    '降服': '降(xiáng)服', '投降': '投降(xiáng)'
+}
+
 
 def require(condition, message):
     if not condition:
@@ -53,6 +65,35 @@ def read_json(path):
 def compact(text):
     return re.sub(r'\s+', '', text)
 
+
+def pronunciation_audit(sentences):
+    """Return context-sensitive polyphone hits needing a human/listening check."""
+    hits = []
+    for sentence in sentences:
+        text = sentence['text']
+        found = [f'{phrase} → {hint}' for phrase, hint in POLYPHONE_HINTS.items() if phrase in text]
+        if found and not sentence.get('tts_text') and not sentence.get('pronunciation'):
+            hits.append({'id': sentence['id'], 'text': text, 'hints': found,
+                         'action': '试听确认；若模型误读，填写 pronunciation（优先）或 tts_text，字幕仍保留 text'})
+    return hits
+
+
+
+def tts_input(sentence):
+    """Build engine input while preserving subtitle/approved text.
+
+    ``pronunciation`` is a list of {text, proxy, reading} entries. Proxy
+    substitutions are TTS-only and must keep the same spoken intent;
+    ``tts_text`` remains available for engine-specific overrides.
+    """
+    explicit = sentence.get('tts_text')
+    value = sentence['text'] if explicit is None else explicit
+    for item in sentence.get('pronunciation', []):
+        source = str(item.get('text', ''))
+        proxy = str(item.get('proxy', ''))
+        require(source and proxy, f"Invalid pronunciation entry in {sentence['id']}")
+        value = value.replace(source, proxy)
+    return value
 
 def char_units(ch):
     """Approximate rendered width in half-em units for deterministic wrapping."""
@@ -171,6 +212,10 @@ class Project:
             require(music.get('source') and music.get('license'), 'Music needs source and license notes')
         mix = c.get('mix', {})
         require(-30 <= float(mix.get('music_relative_db', -12)) <= 0, 'music_relative_db must be -30..0 dB')
+        motion_cfg = c.get('motion', {})
+        require(motion_cfg.get('easing', 'smoothstep') in ('linear', 'smoothstep'), 'motion.easing must be linear or smoothstep')
+        require(2 <= int(motion_cfg.get('oversample', 3)) <= 5, 'motion.oversample must be 2..5')
+        require(0 <= float(motion_cfg.get('max_zoom', 0.06)) <= 0.15, 'motion.max_zoom must be 0..0.15')
 
     def selected(self, stage):
         return [self.shots[s] for s in self.c['demo']['shots']] if stage == 'demo' else self.c['shots']
@@ -192,6 +237,7 @@ class Project:
                     voices.append(self.asset(sentence['audio']))
         return digest({'script': self.script_key(), 'style': self.c['style'], 'voice': self.c['voice'],
                        'output': self.output, 'subtitles': self.c['subtitles'], 'shots': shots, 'demo': self.c['demo'],
+                       'motion': self.c.get('motion', {}),
                        'images': [self.asset(s['asset']) for s in shots], 'voices': voices,
                        'music': [(m, self.asset(m['path'])) for m in self.c.get('music', [])],
                        'mix': self.c.get('mix', {}),
@@ -258,13 +304,13 @@ class Project:
                     nonlocal model
                     if config['engine'] == 'cosyvoice':
                         text_file = target.with_suffix('.txt')
-                        text_file.write_text(sentence['text'], encoding='utf-8')
+                        text_file.write_text(tts_input(sentence), encoding='utf-8')
                         argv = []
                         for arg in config['command']:
                             value = str(arg)
                             value = value.replace('{text_file}', str(text_file)).replace('{output}', str(target))
                             value = value.replace('{model_path}', str(self.path_for(config['model_path'])))
-                            value = value.replace('{text}', sentence['text'])
+                            value = value.replace('{text}', tts_input(sentence))
                             argv.append(value)
                         try:
                             run(argv, cwd=str(self.root))
@@ -292,9 +338,16 @@ class Project:
                         model = TTS(language=config.get('language', 'ZH'), device=config.get('device', 'cpu'))
                     speaker = config.get('speaker', 'ZH')
                     require(speaker in model.hps.data.spk2id, 'Unknown MeloTTS speaker: ' + speaker)
-                    model.tts_to_file(sentence['text'], model.hps.data.spk2id[speaker], str(target),
+                    model.tts_to_file(tts_input(sentence), model.hps.data.spk2id[speaker], str(target),
                                       speed=config.get('speed', 1), quiet=True)
-                p = self.cached('tts', {'text': sentence['text'], 'voice': config}, '.wav', synthesize)
+                p = self.cached('tts', {'text': tts_input(sentence), 'subtitle_text': sentence['text'], 'pronunciation': sentence.get('pronunciation', []), 'voice': config}, '.wav', synthesize)
+            source = p
+            normalize_inputs = {'source': self.asset(source), 'target_lufs': -20, 'true_peak': -2,
+                                'dynamic_normalization': 'dynaudnorm:f=20:g=3:p=0.98:m=30'}
+            p = self.cached('voice-normalize', normalize_inputs, '.wav',
+                            lambda target, source=source: self.ff(
+                                ['-i', source, '-af', 'loudnorm=I=-20:TP=-2:LRA=7:linear=false,dynaudnorm=f=20:g=3:p=0.98:m=30',
+                                 '-ar', '48000', '-ac', '1', '-c:a', 'pcm_s16le', target]))
             with wave.open(str(p), 'rb') as w:
                 duration = w.getnframes() / w.getframerate()
                 require(duration > 0 and w.getcomptype() == 'NONE', 'Use nonempty PCM WAV files')
@@ -321,10 +374,25 @@ class Project:
             n = durations[i] + tails[i]
             motion = shot.get('motion', 'push')
             progress = f'on/{max(n-1, 1)}'
-            z = {'still': '1', 'push': f'1+0.06*{progress}', 'pull': f'1.06-0.06*{progress}',
-                 'pan-left': '1.06', 'pan-right': '1.06'}[motion]
-            x = f'(iw-iw/zoom)*{progress}' if motion == 'pan-right' else f'(iw-iw/zoom)*(1-{progress})' if motion == 'pan-left' else 'iw/2-iw/zoom/2'
-            vf = f"scale={w*2}:{h*2}:force_original_aspect_ratio=increase,crop={w*2}:{h*2},zoompan=z='{z}':x='{x}':y='ih/2-ih/zoom/2':d={n}:s={w}x{h}:fps={fps},setsar=1"
+            motion_cfg = self.c.get('motion', {})
+            easing = motion_cfg.get('easing', 'smoothstep')
+            if easing == 'smoothstep':
+                # Smooth start/stop avoids visible velocity jumps at shot boundaries.
+                eased = f'(({progress})*({progress})*(3-2*({progress})))'
+            else:
+                eased = progress
+            max_zoom = float(motion_cfg.get('max_zoom', 0.06))
+            oversample = int(motion_cfg.get('oversample', 3))
+            z = {'still': '1', 'push': f'1+{max_zoom}*{eased}', 'pull': f'1+{max_zoom}*(1-({eased}))',
+                 'pan-left': f'1+{max_zoom}*0.5', 'pan-right': f'1+{max_zoom}*0.5'}[motion]
+            if motion in ('pan-left', 'pan-right'):
+                pan = eased if motion == 'pan-right' else f'(1-{eased})'
+                x = f'(iw-iw/zoom)*{pan}'
+                z = f'1+{max_zoom}*0.5'
+            else:
+                x = 'iw/2-iw/zoom/2'
+            sw, sh = w * oversample, h * oversample
+            vf = f"scale={sw}:{sh}:force_original_aspect_ratio=increase,crop={sw}:{sh},zoompan=z='{z}':x='{x}':y='ih/2-ih/zoom/2':d={n}:s={w}x{h}:fps={fps},setsar=1"
             raw.append(self.cached('image-motion', [file_hash(image), vf], '.mp4',
                                    lambda p, image=image, vf=vf, n=n: self.ff(['-i', image, '-vf', vf, '-frames:v', n, '-an', '-c:v', 'libx264', '-preset', 'fast', '-crf', '19', '-pix_fmt', 'yuv420p', p])))
         clips = []
@@ -505,6 +573,7 @@ def initialize(path, source):
                       'output': {'width': 1280, 'height': 720, 'fps': 30},
                       'voice': {'engine': 'melotts', 'language': 'ZH', 'speaker': 'ZH', 'device': 'cpu', 'speed': 1, 'revision': '1'},
                       'subtitles': {'enabled': True, 'font': 'Microsoft YaHei', 'size': 48, 'min_size': 28, 'max_width_ratio': 0.88, 'margin': 30, 'max_chars': 24},
+                      'motion': {'easing': 'smoothstep', 'oversample': 3, 'max_zoom': 0.06},
                       'narration': [], 'shots': [], 'demo': {'shots': []}, 'music': []})
     print('Created ' + str(path) + '; prepare and approve the spoken script before production.')
 
@@ -549,7 +618,10 @@ def main():
         return
     project = Project(args.project, args.ffmpeg)
     if args.command == 'check':
-        print('Project schema and narration coverage passed; this does not imply approvals or media verification.')
+        audit = pronunciation_audit(config.get('narration', []))
+        print(json.dumps({'schema': 'passed', 'narration_coverage': 'passed',
+                          'pronunciation_audit': audit,
+                          'note': 'Polyphone hits require listening confirmation; use sentence.pronunciation for pronunciation-only correction, or tts_text for an engine-specific override.'}, ensure_ascii=False, indent=2))
     elif args.command == 'record':
         require(args.stage in ('script', 'demo'), 'Only script and demo have approval records')
         project.record(args.stage, args.quote or '', args.skip)

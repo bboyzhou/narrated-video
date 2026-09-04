@@ -73,12 +73,12 @@ def main():
     assert baseline['decoded_frames'] == 103
     q = p()
     q.render('full')
-    assert q.stats['rendered'] == 0 and q.stats['reused'] == 8, q.stats
+    assert q.stats['rendered'] == 0 and q.stats['reused'] == 11, q.stats
     # Same path, different image bytes must invalidate affected caches only.
     shutil.copyfile(args.alternate_image, root / 'image-3.png')
     q = p()
     q.render('full')
-    assert q.stats['rendered'] == 4 and q.stats['reused'] == 4, q.stats
+    assert q.stats['rendered'] == 4 and q.stats['reused'] == 7, q.stats
     changed = dict(q.stats)
     # Demo content modification invalidates its approval, but not script approval.
     shutil.copyfile(args.alternate_image, root / 'image-1.png')
