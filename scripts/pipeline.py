@@ -139,7 +139,7 @@ def run(command, cwd=None):
 
 
 class Project:
-    def __init__(self, path, ffmpeg=None):
+    def __init__(self, path, ffmpeg=None, validation_stage='production'):
         self.path = Path(path).resolve()
         self.root = self.path.parent
         self.c = read_json(self.path)
@@ -150,30 +150,115 @@ class Project:
         self.runtime = resolve_paths(self.path, self.c.get('runtime', {}))
         self.ffmpeg = str(Path(ffmpeg).resolve()) if ffmpeg else self.runtime.get('ffmpeg') or os.environ.get('FFMPEG') or shutil.which('ffmpeg')
         self.stats = {'rendered': 0, 'reused': 0}
-        self.validate()
+        self.validate(validation_stage)
 
     def path_for(self, value):
         p = Path(value)
         return p.resolve() if p.is_absolute() else (self.root / p).resolve()
 
-    def validate(self):
+    @staticmethod
+    def _text(value, label):
+        require(isinstance(value, str) and value.strip(), label + ' must be nonempty text')
+
+    @staticmethod
+    def _text_list(value, label, allow_empty=False):
+        expectation = ' must be a list' if allow_empty else ' must be a nonempty list'
+        require(isinstance(value, list) and (allow_empty or value), label + expectation)
+        require(all(isinstance(item, str) and item.strip() for item in value), label + ' must contain nonempty text')
+
+    def validate_storyboard(self):
         c = self.c
+        value = c.get('storyboard')
+        require(isinstance(value, str) and value.strip(),
+                'Project needs storyboard path; prepare a production brief and shot plan before Demo production')
+        self.storyboard_path = self.path_for(value)
+        require(self.storyboard_path.is_file(), 'Storyboard file missing: ' + str(self.storyboard_path))
+        self.storyboard = read_json(self.storyboard_path)
+        require(self.storyboard.get('version') == 1, 'Unsupported storyboard version')
+
+        brief = self.storyboard.get('creative_brief')
+        require(isinstance(brief, dict), 'storyboard.creative_brief must be an object')
+        for key in ('audience', 'platform', 'purpose', 'narrative_arc', 'visual_style',
+                    'pacing', 'voice_direction', 'music_direction'):
+            self._text(brief.get(key), 'storyboard.creative_brief.' + key)
+        target = brief.get('target_duration_seconds')
+        require(type(target) in (int, float) and 1 <= target <= 21600,
+                'storyboard.creative_brief.target_duration_seconds must be 1..21600')
+        self._text_list(brief.get('continuity_anchors'), 'storyboard.creative_brief.continuity_anchors')
+        self._text_list(brief.get('constraints'), 'storyboard.creative_brief.constraints', allow_empty=True)
+
+        planned = self.storyboard.get('shots')
+        require(isinstance(planned, list) and planned, 'storyboard.shots must be a nonempty list')
+        require(all(isinstance(shot, dict) for shot in planned), 'storyboard.shots must contain objects')
+        require([shot.get('id') for shot in planned] == list(self.shots),
+                'Storyboard shots must match project shots exactly and in order')
+        self.storyboard_shots = {shot['id']: shot for shot in planned}
+        for shot_id, plan in self.storyboard_shots.items():
+            shot = self.shots[shot_id]
+            require(plan.get('narration') == shot['narration'],
+                    shot_id + ': storyboard narration must match project shot narration')
+            self._text(plan.get('purpose'), shot_id + '.purpose')
+            estimate = plan.get('estimated_duration_seconds')
+            require(type(estimate) in (int, float) and estimate > 0,
+                    shot_id + '.estimated_duration_seconds must be positive')
+            visual = plan.get('visual')
+            require(isinstance(visual, dict), shot_id + '.visual must be an object')
+            for key in ('subject', 'action', 'setting', 'shot_size', 'composition', 'lighting_color'):
+                self._text(visual.get(key), shot_id + '.visual.' + key)
+            self._text_list(plan.get('continuity'), shot_id + '.continuity')
+            self._text(plan.get('prompt'), shot_id + '.prompt')
+            self._text(plan.get('negative_prompt'), shot_id + '.negative_prompt')
+            require(plan.get('asset_strategy') in ('user', 'generate', 'licensed', 'mixed'),
+                    shot_id + '.asset_strategy must be user, generate, licensed or mixed')
+            require(plan.get('motion') == shot.get('motion', 'push'),
+                    shot_id + ': storyboard motion must match project shot motion')
+            require(type(plan.get('transition_seconds')) in (int, float) and
+                    abs(plan['transition_seconds'] - shot.get('transition', 0.3)) < 1e-9,
+                    shot_id + ': storyboard transition_seconds must match project shot transition')
+            require(shot.get('prompt') == plan['prompt'],
+                    shot_id + ': project prompt must match the approved storyboard prompt')
+            require(shot.get('negative_prompt') == plan['negative_prompt'],
+                    shot_id + ': project negative_prompt must match the approved storyboard')
+
+        demo = self.storyboard.get('demo')
+        require(isinstance(demo, dict), 'storyboard.demo must be an object')
+        require(demo.get('shots') == c['demo']['shots'],
+                'storyboard.demo.shots must match project demo.shots')
+        self._text(demo.get('selection_reason'), 'storyboard.demo.selection_reason')
+        self._text_list(demo.get('validation_goals'), 'storyboard.demo.validation_goals')
+
+    def validate(self, validation_stage='production'):
+        c = self.c
+        require(validation_stage in ('script', 'production'), 'Unknown validation stage')
         require(c.get('version') == VERSION, 'Unsupported project version')
         self.output = c['output']
         self.fps = self.output['fps']
         require(type(self.fps) is int and 1 <= self.fps <= 60, 'fps must be an integer in 1..60')
         for k in ('width', 'height'):
             require(type(self.output[k]) is int and self.output[k] >= 64 and self.output[k] % 2 == 0, k + ' must be even and >=64')
-        require(c['narration'] and c['shots'], 'Fill narration and shots first')
+        require(c['narration'], 'Fill narration first')
         self.sentences = {s['id']: s for s in c['narration']}
-        self.shots = {s['id']: s for s in c['shots']}
-        require(len(self.sentences) == len(c['narration']) and len(self.shots) == len(c['shots']), 'Duplicate IDs')
-        for item in c['narration'] + c['shots']:
+        require(len(self.sentences) == len(c['narration']), 'Duplicate narration IDs')
+        for item in c['narration']:
             require(re.fullmatch(r'[A-Za-z0-9_-]+', item['id']), 'IDs must use ASCII letters, digits, _ or -')
         for sentence in c['narration']:
             require(isinstance(sentence['text'], str) and compact(sentence['text']), 'Empty narration text')
         text = self.path_for(c['script']).read_text(encoding='utf-8-sig')
         require(compact(text) == compact(''.join(s['text'] for s in c['narration'])), 'Narration must match the approved plain spoken script exactly (except whitespace)')
+        sub = c['subtitles']
+        require(re.fullmatch(r'[\w -]+', sub['font'], re.UNICODE), 'Use a plain font family name')
+        require(8 <= sub.get('size', 24) <= 120, 'Subtitle size must be 8..120 at 720p')
+        require(5 <= sub.get('max_chars', 24) <= 60, 'Subtitle max_chars must be 5..60')
+        for sentence in c['narration']:
+            require(len(re.sub(r'\s+', ' ', sentence['text']).strip()) <= sub.get('max_chars', 24) * 2,
+                    sentence['id'] + ': subtitle exceeds two lines; split at real spoken boundaries')
+        if validation_stage == 'script':
+            return
+        require(c['shots'], 'Fill shots and storyboard before production')
+        self.shots = {s['id']: s for s in c['shots']}
+        require(len(self.shots) == len(c['shots']), 'Duplicate shot IDs')
+        for item in c['shots']:
+            require(re.fullmatch(r'[A-Za-z0-9_-]+', item['id']), 'IDs must use ASCII letters, digits, _ or -')
         covered = []
         for shot in c['shots']:
             require(shot['type'] == 'image', 'Only image assets are implemented; video requires an adapter')
@@ -186,6 +271,7 @@ class Project:
         require(demo and all(s in self.shots for s in demo), 'Demo must reference existing shots')
         positions = [list(self.shots).index(s) for s in demo]
         require(positions == list(range(positions[0], positions[0] + len(positions))), 'Demo shots must be consecutive and ordered')
+        self.validate_storyboard()
         voice = c['voice']
         require(voice['engine'] in ('files', 'melotts', 'cosyvoice'), 'voice.engine must be files, melotts or cosyvoice')
         if voice['engine'] == 'cosyvoice':
@@ -198,13 +284,6 @@ class Project:
             require(voice.get('license'), 'CosyVoice requires model license notes')
             require(self.path_for(voice['model_path']).exists(), 'CosyVoice model_path unavailable: ' + str(voice['model_path']))
         require(0.1 <= voice.get('speed', 1) <= 3, 'voice.speed must be 0.1..3')
-        sub = c['subtitles']
-        require(re.fullmatch(r'[\w -]+', sub['font'], re.UNICODE), 'Use a plain font family name')
-        require(8 <= sub.get('size', 24) <= 120, 'Subtitle size must be 8..120 at 720p')
-        require(5 <= sub.get('max_chars', 24) <= 60, 'Subtitle max_chars must be 5..60')
-        for sentence in c['narration']:
-            require(len(re.sub(r'\s+', ' ', sentence['text']).strip()) <= sub.get('max_chars', 24) * 2,
-                    sentence['id'] + ': subtitle exceeds two lines; split at real spoken boundaries')
         require(c['demo'].get('start_seconds', 0) >= 0, 'Demo start_seconds cannot be negative')
         for music in c.get('music', []):
             require(music['end'] > music['start'] >= 0, 'Invalid music interval')
@@ -224,6 +303,43 @@ class Project:
     def script_key(self):
         return digest([{'id': s['id'], 'text': s['text']} for s in self.c['narration']])
 
+    def storyboard_execution(self, shot_ids=None):
+        ids = set(shot_ids) if shot_ids is not None else None
+        return [{key: shot.get(key) for key in ('id', 'type', 'narration', 'motion', 'transition',
+                                                 'prompt', 'negative_prompt')}
+                for shot in self.c['shots'] if ids is None or shot['id'] in ids]
+
+    def storyboard_key(self):
+        return digest({'script': self.script_key(), 'storyboard': self.storyboard,
+                       'style': self.c['style'], 'output': self.output,
+                       'motion': self.c.get('motion', {}),
+                       'execution': self.storyboard_execution()})
+
+    def demo_storyboard_key(self):
+        ids = self.c['demo']['shots']
+        plans = [self.storyboard_shots[shot_id] for shot_id in ids]
+        return digest({'script': self.script_key(),
+                       'creative_brief': self.storyboard['creative_brief'],
+                       'shots': plans, 'demo': self.storyboard['demo'],
+                       'execution': self.storyboard_execution(ids)})
+
+    def storyboard_report(self):
+        total = sum(shot['estimated_duration_seconds'] for shot in self.storyboard['shots'])
+        demo_total = sum(self.storyboard_shots[shot_id]['estimated_duration_seconds']
+                         for shot_id in self.c['demo']['shots'])
+        target = self.storyboard['creative_brief']['target_duration_seconds']
+        warnings = []
+        if abs(total - target) / target > 0.2:
+            warnings.append('Storyboard estimate differs from target duration by more than 20%; review pacing before approval')
+        if not 20 <= demo_total <= 40:
+            warnings.append('Demo estimate is outside the recommended 20-40 second range; confirm that the selected span is still representative')
+        return {'status': 'passed', 'shots': len(self.storyboard['shots']),
+                'estimated_duration_seconds': total, 'target_duration_seconds': target,
+                'demo_estimated_duration_seconds': demo_total,
+                'demo_selection_reason': self.storyboard['demo']['selection_reason'],
+                'demo_validation_goals': self.storyboard['demo']['validation_goals'],
+                'warnings': warnings}
+
     def asset(self, value):
         p = self.path_for(value)
         return {'path': str(p), 'sha256': file_hash(p) if p.is_file() else None}
@@ -237,6 +353,7 @@ class Project:
                 if sentence.get('audio'):
                     voices.append(self.asset(sentence['audio']))
         return digest({'script': self.script_key(), 'style': self.c['style'], 'voice': self.c['voice'],
+                       'storyboard': self.demo_storyboard_key(),
                        'output': self.output, 'subtitles': self.c['subtitles'], 'shots': shots, 'demo': self.c['demo'],
                        'motion': self.c.get('motion', {}),
                        'images': [self.asset(s['asset']) for s in shots], 'voices': voices,
@@ -248,6 +365,10 @@ class Project:
     def gate(self, stage):
         record = self.state.get('script', {})
         require(record.get('fingerprint') == self.script_key(), 'Script approval missing or stale; obtain user approval and record it')
+        if stage in ('demo', 'full'):
+            record = self.state.get('storyboard', {})
+            require(record.get('fingerprint') == self.storyboard_key(),
+                    'Storyboard approval missing or stale; review the production brief and full shot plan with the user')
         if stage == 'full':
             require(self.state.get('demo', {}).get('fingerprint') == self.demo_key(), 'Demo approval missing or stale; render and approve a new Demo')
 
@@ -255,6 +376,9 @@ class Project:
         require(quote.strip(), 'Record the actual user reply')
         if stage == 'script':
             key = self.script_key()
+        elif stage == 'storyboard':
+            self.gate('storyboard')
+            key = self.storyboard_key()
         else:
             self.gate('demo')
             key = self.demo_key()
@@ -487,8 +611,12 @@ class Project:
                                                              'audio': {sid: {**v, 'path': str(v['path'])} for sid, v in voices.items()},
                                                              'music': [{**m, **self.asset(m['path'])} for m in self.c['music']]})
         shutil.copyfile(self.path, destination / 'project.json')
-        write_json(destination / 'approvals.json', {k: self.state.get(k) for k in ('script', 'demo')})
-        self.state[stage + '_render'] = {'fingerprint': self.demo_key() if stage == 'demo' else digest(self.c),
+        storyboard_copy = destination / 'storyboard.json'
+        if self.storyboard_path.resolve() != storyboard_copy.resolve():
+            shutil.copyfile(self.storyboard_path, storyboard_copy)
+        write_json(destination / 'approvals.json', {k: self.state.get(k) for k in ('script', 'storyboard', 'demo')})
+        self.state[stage + '_render'] = {'fingerprint': self.demo_key() if stage == 'demo' else
+                                        digest({'config': self.c, 'storyboard': self.storyboard_key()}),
                                         'sha256': file_hash(artifact), 'frames': cursor, 'cache': self.stats}
         write_json(self.state_path, self.state)
         report = self.verify(stage)
@@ -559,6 +687,8 @@ def initialize(path, source):
     path = Path(path).resolve()
     require(not path.exists(), 'Project already exists; refusing to overwrite')
     path.parent.mkdir(parents=True, exist_ok=True)
+    storyboard_path = path.parent / 'storyboard.json'
+    require(not storyboard_path.exists(), 'Storyboard already exists; refusing to overwrite')
     if source:
         source = Path(source).resolve()
         if source.is_dir():
@@ -569,7 +699,15 @@ def initialize(path, source):
         saved = path.parent / ('source' + source.suffix)
         require(not saved.exists(), 'Saved source already exists')
         saved.write_text(text, encoding='utf-8')
+    write_json(storyboard_path, {'version': 1,
+                                 'creative_brief': {'audience': '', 'platform': '', 'purpose': '',
+                                                    'target_duration_seconds': 60, 'narrative_arc': '',
+                                                    'visual_style': '', 'pacing': '', 'voice_direction': '',
+                                                    'music_direction': '', 'continuity_anchors': [], 'constraints': []},
+                                 'shots': [],
+                                 'demo': {'shots': [], 'selection_reason': '', 'validation_goals': []}})
     write_json(path, {'version': 1, 'title': path.parent.name, 'script': 'approved-script.txt',
+                      'storyboard': 'storyboard.json',
                       'runtime': {'offline': True},
                       'style': {'name': 'custom', 'visual': '', 'tone': ''},
                       'output': {'width': 1280, 'height': 720, 'fps': 30},
@@ -577,7 +715,7 @@ def initialize(path, source):
                       'subtitles': {'enabled': True, 'font': 'Microsoft YaHei', 'size': 48, 'min_size': 28, 'max_width_ratio': 0.88, 'margin': 30, 'max_chars': 24},
                       'motion': {'easing': 'smoothstep', 'oversample': 3, 'max_zoom': 0.06},
                       'narration': [], 'shots': [], 'demo': {'shots': []}, 'music': []})
-    print('Created ' + str(path) + '; prepare and approve the spoken script before production.')
+    print('Created ' + str(path) + '; approve the spoken script, then prepare and approve storyboard.json before production.')
 
 
 def main():
@@ -585,7 +723,7 @@ def main():
     parser.add_argument('command', choices=['init', 'paths', 'configure', 'remember-runtime', 'doctor', 'check', 'record', 'tts', 'render', 'verify'])
     parser.add_argument('project', help='Project JSON path')
     parser.add_argument('--source', help='Input .txt/.md or directory (init only)')
-    parser.add_argument('--stage', choices=['script', 'demo', 'full'], default='demo')
+    parser.add_argument('--stage', choices=['script', 'storyboard', 'demo', 'full'], default='demo')
     parser.add_argument('--quote', help='Actual user approval reply (record only)')
     parser.add_argument('--skip', action='store_true', help='Record an explicitly authorized stage skip')
     parser.add_argument('--ffmpeg', help='Existing FFmpeg executable path')
@@ -629,18 +767,21 @@ def main():
         if not report['ok']:
             raise SystemExit(1)
         return
-    project = Project(args.project, args.ffmpeg)
+    validation_stage = 'script' if args.stage == 'script' and args.command in ('check', 'record') else 'production'
+    project = Project(args.project, args.ffmpeg, validation_stage)
     if args.command == 'check':
         audit = pronunciation_audit(config.get('narration', []))
-        print(json.dumps({'schema': 'passed', 'narration_coverage': 'passed',
-                          'pronunciation_audit': audit,
-                          'note': 'Polyphone hits require listening confirmation; use sentence.pronunciation for pronunciation-only correction, or tts_text for an engine-specific override.'}, ensure_ascii=False, indent=2))
+        report = {'schema': 'passed', 'pronunciation_audit': audit,
+                  'note': 'Polyphone hits require listening confirmation; use sentence.pronunciation for pronunciation-only correction, or tts_text for an engine-specific override.'}
+        if validation_stage == 'production':
+            report.update({'narration_coverage': 'passed', 'storyboard': project.storyboard_report()})
+        print(json.dumps(report, ensure_ascii=False, indent=2))
     elif args.command == 'record':
-        require(args.stage in ('script', 'demo'), 'Only script and demo have approval records')
+        require(args.stage in ('script', 'storyboard', 'demo'), 'Only script, storyboard and demo have approval records')
         project.record(args.stage, args.quote or '', args.skip)
         print('Recorded actual user reply for ' + args.stage)
     else:
-        require(args.stage != 'script', 'Use demo or full for media commands')
+        require(args.stage not in ('script', 'storyboard'), 'Use demo or full for media commands')
         if args.command == 'tts':
             print(json.dumps({k: {**v, 'path': str(v['path'])} for k,v in project.voices(args.stage).items()}, ensure_ascii=False))
         elif args.command == 'render':

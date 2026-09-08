@@ -16,11 +16,14 @@ python $pipeline init $project --source 'D:/documents/source.md'
 
 `init` 只复制原文并建立空配置，不把 Markdown 标题等自动转成口播。也可省略 `--source`，由 agent 将对话文案以 UTF-8 保存为项目 `source.txt`。目录输入必须恰好包含一个 `.txt`/`.md`，多个时明确选择。现有项目不会被覆盖。
 
-用户批准完整改写稿后，将纯口播文字写入 `approved-script.txt`，将自然短句配置到 `narration`。脚本检查去除空白后的内容完全一致，标点仍须一致。不要把说明、标题、批准回复混入该文件。
+用户批准完整改写稿后，将纯口播文字写入 `approved-script.txt`，将自然短句配置到 `narration`。脚本检查去除空白后的内容完全一致，标点仍须一致。不要把说明、标题、批准回复混入该文件。然后按 [分镜设计与审批](storyboard.md) 完成 `storyboard.json` 和项目 `shots`，向用户展示完整审阅稿并获得分镜批准。
 
 ```powershell
-python $pipeline check $project
+python $pipeline check $project --stage script
 python $pipeline record $project --stage script --quote '用户实际批准回复'
+python $pipeline check $project
+# agent 展示制作纲要、完整逐镜表、Demo 选择理由与验证目标；此处等待真实回复。
+python $pipeline record $project --stage storyboard --quote '用户实际批准回复'
 python $pipeline tts $project --stage demo
 python $pipeline render $project --stage demo --ffmpeg $ffmpeg
 # agent 抽帧查看、试听，并将 Demo 交给用户；此处等待真实回复。
@@ -31,11 +34,11 @@ python $pipeline verify $project --stage full --ffmpeg $ffmpeg
 
 首次环境选择并通过 `doctor` 后，可运行 `python $pipeline remember-runtime $project`，让其他项目和 Agent 会话复用这些已验证路径。
 
-`record` 是记录器，不判断回复含义，也不代表用户已经批准。必须由 agent 根据实际对话填写。`--skip` 仅在用户明确跳过相应阶段时使用，`--quote` 保留原话与跳过范围。普通 Demo 批准要求当前配置已渲染，并检查样片文件未改变。测试项目中可使用明确标注的测试授权，但不能复制到真实项目。
+`record` 是记录器，不判断回复含义，也不代表用户已经批准。必须由 agent 根据实际对话填写。`--skip` 仅在用户明确跳过相应阶段时使用，`--quote` 保留原话与跳过范围。分镜审批无需先渲染，但必须已有完整且通过 `check` 的分镜；普通 Demo 批准要求当前配置已渲染，并检查样片文件未改变。测试项目中可使用明确标注的测试授权，但不能复制到真实项目。
 
-Demo 未批准时，`tts/render --stage full` 拒绝执行；Demo 模式只处理选中的镜头，不要求其他镜头的图片/音频已存在。项目目录 `.narrated-video/state.json` 保存批准和渲染记录；`.narrated-video/cache/` 保存缓存。不要并发渲染同一项目。
+分镜未批准时，任何 `tts/render` 都拒绝执行；Demo 未批准时，`tts/render --stage full` 拒绝执行。Demo 模式只处理选中的镜头，不要求其他镜头的图片/音频已存在。项目目录 `.narrated-video/state.json` 保存批准和渲染记录；`.narrated-video/cache/` 保存缓存。不要并发渲染同一项目。
 
-产物在 `deliverables/`：`demo.mp4` 或 `full.mp4`、同名 SRT、时间轴、素材清单、验证报告、3 张抽帧、项目配置副本和批准记录副本。项目副本保留原项目的相对路径；可移交的完整项目应连同原项目目录、素材、源文件和缓存配音一起复制，单独复制 deliverables 不是可移植工程。
+产物在 `deliverables/`：`demo.mp4` 或 `full.mp4`、同名 SRT、时间轴、素材清单、验证报告、3 张抽帧、项目配置、完整 `storyboard.json` 和批准记录副本。项目副本保留原项目的相对路径；可移交的完整项目应连同原项目目录、素材、源文件和缓存配音一起复制，单独复制 deliverables 不是可移植工程。
 
 ## 配置示例
 
@@ -46,6 +49,7 @@ Demo 未批准时，`tts/render --stage full` 拒绝执行；Demo 模式只处�
   "version": 1,
   "title": "示例项目",
   "script": "approved-script.txt",
+  "storyboard": "storyboard.json",
   "style": {"name": "水墨", "visual": "留白与统一墨色", "tone": "自然沉稳"},
   "output": {"width": 1280, "height": 720, "fps": 30},
   "voice": {"engine": "melotts", "language": "ZH", "speaker": "ZH", "device": "cpu", "speed": 0.95, "revision": "1"},
@@ -56,8 +60,8 @@ Demo 未批准时，`tts/render --stage full` 拒绝执行；Demo 模式只处�
     {"id": "N002", "text": "接下来，我们走近这段历史。"}
   ],
   "shots": [
-    {"id": "S001", "type": "image", "asset": "images/001.png", "narration": ["N001"], "motion": "push", "transition": 0.3, "prompt": "已使用的图片提示词", "source": "生成工具及生成记录"},
-    {"id": "S002", "type": "image", "asset": "images/002.png", "narration": ["N002"], "motion": "pan-right", "transition": 0.3, "prompt": "已使用的图片提示词", "source": "生成工具及生成记录"}
+    {"id": "S001", "type": "image", "asset": "images/001.png", "narration": ["N001"], "motion": "push", "transition": 0.3, "prompt": "与分镜一致的图片提示词", "negative_prompt": "文字、水印、时代错误", "source": "生成工具及生成记录"},
+    {"id": "S002", "type": "image", "asset": "images/002.png", "narration": ["N002"], "motion": "pan-right", "transition": 0.3, "prompt": "与分镜一致的图片提示词", "negative_prompt": "文字、水印、人物设定变化", "source": "生成工具及生成记录"}
   ],
   "demo": {"shots": ["S001", "S002"]},
   "music": [
@@ -67,7 +71,7 @@ Demo 未批准时，`tts/render --stage full` 拒绝执行；Demo 模式只处�
 }
 ```
 
-示例素材必须换为真实文件；不需要配乐时使用空数组 `music: []`。风格是创作说明，不会自动改变图像或配音；具体行为由图片、voice、shots、subtitles、music 实现。字体需已安装，FFmpeg 可能静默替代缺失字体，必须检查抽帧。
+`storyboard.json` 的完整结构、填写标准和用户审阅格式见 [分镜设计与审批](storyboard.md)。其中镜头 ID、口播映射、正负提示词、运镜和转场必须与项目 `shots` 一致；`check` 会拒绝漂移。示例素材必须换为真实文件；不需要配乐时使用空数组 `music: []`。风格是创作说明，不会自动改变图像或配音；具体行为由分镜、图片、voice、shots、subtitles、music 实现。字体需已安装，FFmpeg 可能静默替代缺失字体，必须检查抽帧。
 
 ### 配音和时间轴
 
@@ -91,7 +95,7 @@ Demo 未批准时，`tts/render --stage full` 拒绝执行；Demo 模式只处�
 
 ### 增量与验证
 
-文案/分句改变会使 script 和 Demo 批准失效；style、voice、字幕、输出、音乐及 Demo 镜头内容改变使 Demo 批准失效。其他镜头换图不要求重新批准 Demo。文件内容用 SHA-256 检查，路径相同但内容变了也会失效。
+文案/分句改变会使 script、storyboard 和 Demo 批准失效；任何完整分镜变化会使 storyboard 批准失效，只有制作纲要、Demo 选段或 Demo 镜头内容变化才同时使 Demo 批准失效。style、voice、字幕、输出、音乐及 Demo 素材改变也使 Demo 批准失效。其他镜头换图不要求重新批准 storyboard 或 Demo。文件内容用 SHA-256 检查，路径相同但内容变了也会失效。
 
 缓存分为 TTS、图片运镜、镜头音视频、拼接、最终字幕混音。每步成功后写入校验记录；失败的 partial 文件不会被当作成功缓存。换图重做相关运镜和叠化的下一镜头，换字幕不重做图片，改配音仅重做受影响内容和下游。最终封装/校验仍需遍历整片，不代表完全免除全片处理。渲染器代码变化使缓存失效，模型更新用 voice.revision 失效。缓存不自动清理。
 
@@ -101,4 +105,4 @@ Demo 未批准时，`tts/render --stage full` 拒绝执行；Demo 模式只处�
 
 ## 脚本回归测试
 
-`scripts/test_pipeline.py` 使用已有两张不同图片、临时生成的 PCM 测试音和真实 FFmpeg，在指定输出目录下建立独立临时工程，检查审批门禁、时长、增量更新、失败续跑和缓存损坏恢复。测试批准明确标为 TEST FIXTURE，不适用于真实制作。命令参数为 `--ffmpeg`、`--image`、`--alternate-image`、`--output`。音色和长片性能不在该测试覆盖范围内。
+`scripts/test_storyboard.py` 不依赖 FFmpeg，检查分镜结构、审批门禁和分镜变更的精细失效范围。`scripts/test_pipeline.py` 使用已有两张不同图片、临时生成的 PCM 测试音和真实 FFmpeg，在指定输出目录下建立独立临时工程，检查三阶段审批门禁、时长、增量更新、失败续跑和缓存损坏恢复。测试批准明确标为 TEST FIXTURE，不适用于真实制作。命令参数为 `--ffmpeg`、`--image`、`--alternate-image`、`--output`。音色和长片性能不在该测试覆盖范围内。

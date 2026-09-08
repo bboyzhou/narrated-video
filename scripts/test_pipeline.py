@@ -31,6 +31,29 @@ def tone(path, duration, frequency):
         w.writeframes(b''.join(struct.pack('<h', int(2400 * math.sin(2*math.pi*frequency*i/rate))) for i in range(round(rate*duration))))
 
 
+def storyboard_for(shots):
+    plans = []
+    for i, shot in enumerate(shots, 1):
+        plans.append({'id': shot['id'], 'narration': shot['narration'],
+                      'purpose': f'验证镜头 {i} 的叙事信息', 'estimated_duration_seconds': 12,
+                      'visual': {'subject': f'测试主体 {i}', 'action': '保持静态姿态', 'setting': '测试环境',
+                                 'shot_size': '中景', 'composition': '主体居中并保留字幕安全区',
+                                 'lighting_color': '柔和中性色'},
+                      'continuity': ['统一主体比例与中性色调'],
+                      'prompt': shot['prompt'], 'negative_prompt': shot['negative_prompt'],
+                      'asset_strategy': 'user', 'motion': shot['motion'],
+                      'transition_seconds': shot['transition']})
+    return {'version': 1,
+            'creative_brief': {'audience': '回归测试人员', 'platform': '本地验证', 'purpose': '验证制作门禁',
+                               'target_duration_seconds': 36, 'narrative_arc': '依次展示三个测试镜头',
+                               'visual_style': '统一测试图片', 'pacing': '每镜约十二秒',
+                               'voice_direction': '合成测试音', 'music_direction': '低音量测试音',
+                               'continuity_anchors': ['统一画幅与色调'], 'constraints': ['仅用于自动化测试']},
+            'shots': plans,
+            'demo': {'shots': ['S1', 'S2'], 'selection_reason': '连续两镜可覆盖运镜与转场',
+                     'validation_goals': ['验证字幕、运镜和叠化']}}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('ffmpeg', 'image', 'alternate-image', 'output'):
@@ -48,17 +71,24 @@ def main():
     c['style'] = {'name': 'isolated regression fixture'}
     c['narration'] = [{'id': f'N{i}', 'text': text, 'audio': f'audio-{i}.wav'} for i, text in enumerate(['这是第一句。', '这是第二句。', '这是第三句。'], 1)]
     (root / 'approved-script.txt').write_text('这是第一句。这是第二句。这是第三句。', encoding='utf-8')
-    c['shots'] = [{'id': f'S{i}', 'type': 'image', 'asset': f'image-{i}.png', 'narration': [f'N{i}'], 'motion': motion, 'transition': .2, 'source': 'Existing local validation asset'} for i, motion in enumerate(['push', 'pan-right', 'pull'], 1)]
+    c['shots'] = [{'id': f'S{i}', 'type': 'image', 'asset': f'image-{i}.png', 'narration': [f'N{i}'],
+                   'motion': motion, 'transition': .2, 'prompt': f'Test image {i}',
+                   'negative_prompt': 'No text or watermark',
+                   'source': 'Existing local validation asset'}
+                  for i, motion in enumerate(['push', 'pan-right', 'pull'], 1)]
     c['demo'] = {'shots': ['S1', 'S2']}
     c['music'] = [{'path': 'music.wav', 'start': 0, 'end': 8, 'volume': .1, 'fade_in': .2, 'fade_out': .2, 'source': 'Synthetic local test tone', 'license': 'Test generated'}]
     for i, duration in enumerate([1.07, 1.13], 1):
         tone(root / f'audio-{i}.wav', duration, 220*i)
         shutil.copyfile(args.image, root / f'image-{i}.png')
     tone(root / 'music.wav', 1.5, 110)
+    write_json(root / 'storyboard.json', storyboard_for(c['shots']))
     write_json(project_file, c)
     p = lambda: Project(project_file, args.ffmpeg)
     rejected(lambda: p().render('demo'), 'Script approval')
     p().record('script', 'TEST FIXTURE ONLY: approve script')
+    rejected(lambda: p().render('demo'), 'Storyboard approval')
+    p().record('storyboard', 'TEST FIXTURE ONLY: approve storyboard')
     rejected(lambda: p().render('full'), 'Demo approval')
     rejected(lambda: p().record('demo', 'TEST FIXTURE'), 'Render the current Demo')
     # Missing non-Demo assets must not block a Demo.
@@ -74,6 +104,13 @@ def main():
     q = p()
     q.render('full')
     assert q.stats['rendered'] == 0 and q.stats['reused'] == 11, q.stats
+    # A non-Demo storyboard edit requires full-plan reapproval but preserves Demo approval.
+    storyboard = read_json(root / 'storyboard.json')
+    storyboard['shots'][2]['purpose'] = '更新第三镜的叙事信息'
+    write_json(root / 'storyboard.json', storyboard)
+    rejected(lambda: p().gate('full'), 'Storyboard approval')
+    p().record('storyboard', 'TEST FIXTURE ONLY: approve updated non-Demo storyboard')
+    p().gate('full')
     # Same path, different image bytes must invalidate affected caches only.
     shutil.copyfile(args.alternate_image, root / 'image-3.png')
     q = p()
@@ -110,7 +147,7 @@ def main():
     done.write_text('corrupt', encoding='utf-8')
     done = q.cached('test-failure', {}, '.txt', lambda target: target.write_text('recovered', encoding='utf-8'))
     assert done.read_text(encoding='utf-8') == 'recovered'
-    report = {'passed': True, 'project': str(project_file), 'checks': ['init refuses overwrite', 'script gate', 'Demo gate', 'Demo approval requires artifact', 'Demo without remaining assets', 'real decode and frame counts', 'no-change cache reuse', 'same-path image invalidation', 'Demo content invalidation', 'Demo music offset invalidation', 'script invalidation', 'failed step recovery', 'cache corruption recovery'], 'demo_frames': 67, 'full_frames': 103, 'image_change_cache': changed,
+    report = {'passed': True, 'project': str(project_file), 'checks': ['init refuses overwrite', 'script gate', 'storyboard gate', 'Demo gate', 'Demo approval requires artifact', 'Demo without remaining assets', 'real decode and frame counts', 'no-change cache reuse', 'non-Demo storyboard reapproval preserves Demo', 'same-path image invalidation', 'Demo content invalidation', 'Demo music offset invalidation', 'script invalidation', 'failed step recovery', 'cache corruption recovery'], 'demo_frames': 67, 'full_frames': 103, 'image_change_cache': changed,
               'limitations': 'Synthetic tone audio; not a speech quality or full-length performance test'}
     write_json(root / 'test-results.json', report)
     print(json.dumps(report, ensure_ascii=False))
