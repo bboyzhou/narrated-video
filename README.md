@@ -28,6 +28,7 @@ python scripts/pipeline.py remember-runtime D:/videos/example/project.json
 python scripts/test_runtime.py
 python scripts/test_storyboard.py
 python scripts/test_pipeline.py --ffmpeg PATH --image IMAGE --alternate-image IMAGE2 --output TEMP_DIR
+python scripts/test_motion.py --ffmpeg PATH --image IMAGE
 ```
 
 `evals/evals.json` 保存用于审核 skill 行为的场景，不是视频素材或生产配置。

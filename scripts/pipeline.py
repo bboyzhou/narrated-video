@@ -96,6 +96,53 @@ def tts_input(sentence):
         value = value.replace(source, proxy)
     return value
 
+
+def motion_filter(width, height, frames, motion, easing='smoothstep', max_zoom=0.06):
+    """Build a subpixel Ken Burns filter using FFmpeg perspective resampling.
+
+    Unlike zoompan, perspective keeps the source crop coordinates as floating
+    point values and resamples them with cubic interpolation, so slow pans do
+    not become repeated frames followed by integer-pixel jumps.
+    """
+    require(motion in ('still', 'push', 'pull', 'pan-left', 'pan-right'),
+            'Unsupported motion')
+    denominator = max(frames - 1, 1)
+    progress = f'(on-1)/{denominator}'
+    if easing == 'smoothstep':
+        eased = f'(({progress})*({progress})*(3-2*({progress})))'
+    else:
+        eased = progress
+    base = (f'scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,'
+            f'crop={width}:{height},format=gbrp')
+    if motion == 'still':
+        return base + ',setsar=1,format=yuv420p'
+    if motion == 'push':
+        zoom = f'(1+{max_zoom}*{eased})'
+    elif motion == 'pull':
+        zoom = f'(1+{max_zoom}*(1-({eased})))'
+    else:
+        zoom = f'(1+{max_zoom}*0.5)'
+    sample_w = f'(W/{zoom})'
+    sample_h = f'(H/{zoom})'
+    max_x = f'(W-{sample_w})'
+    max_y = f'(H-{sample_h})'
+    if motion == 'push' or motion == 'pull':
+        left = f'({max_x}/2)'
+    elif motion == 'pan-right':
+        left = f'({max_x})*{eased}'
+    else:
+        left = f'({max_x})*(1-({eased}))'
+    top = f'({max_y}/2)'
+    right = f'({left}+{sample_w})'
+    bottom = f'({top}+{sample_h})'
+    perspective = ("perspective="
+                   f"x0='{left}':y0='{top}':"
+                   f"x1='{right}':y1='{top}':"
+                   f"x2='{left}':y2='{bottom}':"
+                   f"x3='{right}':y3='{bottom}':"
+                   "sense=source:eval=frame:interpolation=cubic")
+    return base + ',' + perspective + ',setsar=1,format=yuv420p'
+
 def char_units(ch):
     """Approximate rendered width in half-em units for deterministic wrapping."""
     if ch.isspace():
@@ -294,7 +341,6 @@ class Project:
         require(-30 <= float(mix.get('music_relative_db', -12)) <= 0, 'music_relative_db must be -30..0 dB')
         motion_cfg = c.get('motion', {})
         require(motion_cfg.get('easing', 'smoothstep') in ('linear', 'smoothstep'), 'motion.easing must be linear or smoothstep')
-        require(2 <= int(motion_cfg.get('oversample', 3)) <= 5, 'motion.oversample must be 2..5')
         require(0 <= float(motion_cfg.get('max_zoom', 0.06)) <= 0.15, 'motion.max_zoom must be 0..0.15')
 
     def selected(self, stage):
@@ -498,29 +544,13 @@ class Project:
         for i, shot in enumerate(selected):
             image = self.path_for(shot['asset'])
             n = durations[i] + tails[i]
-            motion = shot.get('motion', 'push')
-            progress = f'on/{max(n-1, 1)}'
             motion_cfg = self.c.get('motion', {})
-            easing = motion_cfg.get('easing', 'smoothstep')
-            if easing == 'smoothstep':
-                # Smooth start/stop avoids visible velocity jumps at shot boundaries.
-                eased = f'(({progress})*({progress})*(3-2*({progress})))'
-            else:
-                eased = progress
-            max_zoom = float(motion_cfg.get('max_zoom', 0.06))
-            oversample = int(motion_cfg.get('oversample', 3))
-            z = {'still': '1', 'push': f'1+{max_zoom}*{eased}', 'pull': f'1+{max_zoom}*(1-({eased}))',
-                 'pan-left': f'1+{max_zoom}*0.5', 'pan-right': f'1+{max_zoom}*0.5'}[motion]
-            if motion in ('pan-left', 'pan-right'):
-                pan = eased if motion == 'pan-right' else f'(1-{eased})'
-                x = f'(iw-iw/zoom)*{pan}'
-                z = f'1+{max_zoom}*0.5'
-            else:
-                x = 'iw/2-iw/zoom/2'
-            sw, sh = w * oversample, h * oversample
-            vf = f"scale={sw}:{sh}:force_original_aspect_ratio=increase,crop={sw}:{sh},zoompan=z='{z}':x='{x}':y='ih/2-ih/zoom/2':d={n}:s={w}x{h}:fps={fps},setsar=1"
+            motion = shot.get('motion', 'push')
+            vf = motion_filter(w, h, n, motion,
+                               motion_cfg.get('easing', 'smoothstep'),
+                               float(motion_cfg.get('max_zoom', 0.06)))
             raw.append(self.cached('image-motion', [file_hash(image), vf], '.mp4',
-                                   lambda p, image=image, vf=vf, n=n: self.ff(['-i', image, '-vf', vf, '-frames:v', n, '-an', '-c:v', 'libx264', '-preset', 'fast', '-crf', '19', '-pix_fmt', 'yuv420p', p])))
+                                   lambda p, image=image, vf=vf, n=n: self.ff(['-loop', '1', '-framerate', str(fps), '-i', image, '-vf', vf, '-frames:v', n, '-an', '-c:v', 'libx264', '-preset', 'fast', '-crf', '19', '-pix_fmt', 'yuv420p', p])))
         clips = []
         timeline = []
         cursor = 0
@@ -713,7 +743,7 @@ def initialize(path, source):
                       'output': {'width': 1280, 'height': 720, 'fps': 30},
                       'voice': {'engine': 'melotts', 'language': 'ZH', 'speaker': 'ZH', 'device': 'cpu', 'speed': 1, 'revision': '1'},
                       'subtitles': {'enabled': True, 'font': 'Microsoft YaHei', 'size': 48, 'min_size': 28, 'max_width_ratio': 0.88, 'margin': 30, 'max_chars': 24},
-                      'motion': {'easing': 'smoothstep', 'oversample': 3, 'max_zoom': 0.06},
+                      'motion': {'easing': 'smoothstep', 'max_zoom': 0.06},
                       'narration': [], 'shots': [], 'demo': {'shots': []}, 'music': []})
     print('Created ' + str(path) + '; approve the spoken script, then prepare and approve storyboard.json before production.')
 

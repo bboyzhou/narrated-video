@@ -54,7 +54,7 @@ python $pipeline verify $project --stage full --ffmpeg $ffmpeg
   "output": {"width": 1280, "height": 720, "fps": 30},
   "voice": {"engine": "melotts", "language": "ZH", "speaker": "ZH", "device": "cpu", "speed": 0.95, "revision": "1"},
   "subtitles": {"enabled": true, "font": "Microsoft YaHei", "size": 48, "min_size": 28, "max_width_ratio": 0.88, "margin": 30, "max_chars": 24},
-  "motion": {"easing": "smoothstep", "oversample": 3, "max_zoom": 0.06},
+  "motion": {"easing": "smoothstep", "max_zoom": 0.06},
   "narration": [
     {"id": "N001", "text": "故事从这里开始。"},
     {"id": "N002", "text": "接下来，我们走近这段历史。"}
@@ -87,7 +87,7 @@ python $pipeline verify $project --stage full --ffmpeg $ffmpeg
 
 ### 运镜、转场及 Demo
 
-- `motion`：`still`、`push`、`pull`、`pan-left`、`pan-right`。默认使用 `smoothstep` 缓动，让运动在起点和终点平滑收停；`oversample`（2–5，默认 3）提高内部渲染倍率以减少平移取整抖动；`max_zoom`（0–0.15，默认 0.06）控制运动幅度。输入按画幅裁切填满。
+- `motion`：`still`、`push`、`pull`、`pan-left`、`pan-right`。默认使用 `smoothstep` 缓动，让运动在起点和终点平滑收停；图片运镜使用 FFmpeg `perspective` 的 `cubic` 亚像素重采样，避免慢速平移的整数像素冻结；旧配置中的 `oversample` 字段保留兼容但不再生效；`max_zoom`（0–0.15，默认 0.06）控制运动幅度。输入按画幅裁切填满。
 - `transition` 是该镜头到下一镜头的叠化秒数，`0` 表示硬切，范围 0–2 秒，须短于相邻两镜头。脚本额外生成运镜尾帧，与下一镜头开头叠化；不压缩解说、不累积提前切镜。
 - `demo.shots` 是连续镜头 ID 列表，20–40 秒是创作建议，非硬编码限制。中段 Demo 需设置 `demo.start_seconds`，用于在全片音乐时间轴上截取相同段落。制作 Demo 前可依据文案估算该位置，完成全片真实配音后必须核对；如音乐听感改变，更新 Demo 并重新确认。
 - `music` 为多段音轨，可重叠；不足长度自动循环，分别淡入淡出，并依据解说进行 sidechain ducking。start/end 使用全片秒数；默认线性增益约为 `0.22`，史诗类音乐可在试听后按听感调整。每个项目先询问创作者音乐意图，再检索至少 3 个候选并让创作者试听；明确选择后才下载和写入 `music`。候选阶段只记录在 `music-selection.json`，不要把未批准音频放入项目。记录预览链接、下载地址、许可、用户选择原话和 SHA-256，避免跨项目无意复用同一曲目。验证报告包含音乐源平均响度和低音量警告；解说统一响度至目标 -18 LUFS，混音加峰值限制器，最终仍需试听成片。
