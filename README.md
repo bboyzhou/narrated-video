@@ -13,7 +13,10 @@ python scripts/pipeline.py init D:/videos/example/project.json --source D:/docum
 python scripts/pipeline.py paths D:/videos/example/project.json
 python scripts/pipeline.py configure D:/videos/example/project.json --python D:/tools/python.exe --ffmpeg D:/tools/ffmpeg.exe --offline true
 python scripts/pipeline.py doctor D:/videos/example/project.json
+python scripts/pipeline.py remember-runtime D:/videos/example/project.json
 ```
+
+`remember-runtime` 会把已验证的运行环境保存到用户级配置，供后续项目和 Agent 会话复用；不会自动安装依赖或下载模型。
 
 不自动安装依赖或下载模型。测试使用隔离临时工程：
 

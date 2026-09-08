@@ -1,4 +1,4 @@
-"""Project-scoped runtime paths; no installation or persistent environment changes."""
+"""Project and user-scoped runtime paths; no installation or downloads."""
 import importlib.util
 import json
 import os
@@ -10,13 +10,67 @@ import sys
 ENV_PATHS = {'nltk_data': 'NLTK_DATA', 'hf_home': 'HF_HOME',
              'hf_hub_cache': 'HF_HUB_CACHE', 'transformers_cache': 'TRANSFORMERS_CACHE'}
 PATH_KEYS = ('python', 'ffmpeg', *ENV_PATHS)
+PROFILE_KEYS = PATH_KEYS
+ENV_CANDIDATES = {
+    'python': ('NARRATED_VIDEO_MELOTTS_PYTHON',),
+    'ffmpeg': ('NARRATED_VIDEO_FFMPEG', 'FFMPEG'),
+    **{key: (variable,) for key, variable in ENV_PATHS.items()},
+}
 
 
-def resolve_paths(project, config):
+def global_runtime_path():
+    """Return a per-user profile path shared by independent Agent sessions."""
+    codex_home = os.environ.get('CODEX_HOME')
+    root = Path(codex_home).expanduser() if codex_home else Path.home() / '.codex'
+    return root / 'narrated-video' / 'runtime.json'
+
+
+def read_global_runtime():
+    path = global_runtime_path()
+    if not path.exists():
+        return {}
+    value = json.loads(path.read_text(encoding='utf-8-sig'))
+    if not isinstance(value, dict):
+        raise ValueError('Global narrated-video runtime profile must be a JSON object: ' + str(path))
+    return {key: value[key] for key in PROFILE_KEYS if key in value}
+
+
+def environment_runtime():
+    result = {}
+    for key, names in ENV_CANDIDATES.items():
+        for name in names:
+            value = os.environ.get(name)
+            if value:
+                result[key] = value
+                break
+    return result
+
+
+def write_global_runtime(selected):
+    current = read_global_runtime()
+    updated = update_config(current, selected)
+    path = global_runtime_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + '.tmp')
+    temporary.write_text(json.dumps(updated, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    temporary.replace(path)
+    return path, updated
+
+
+def resolve_paths(project, config, include_global=True, include_environment=True):
     root = Path(project).resolve().parent
+    sources = []
+    if include_environment:
+        # Resource environment variables are inherited and injected below; do
+        # not turn an unrelated stale cache variable into a strict path check.
+        sources.append({key: value for key, value in environment_runtime().items()
+                        if key in ('python', 'ffmpeg')})
+    if include_global:
+        sources.append(read_global_runtime())
+    sources.append(config or {})
     result = {}
     for key in PATH_KEYS:
-        value = config.get(key)
+        value = next((source.get(key) for source in reversed(sources) if source.get(key)), None)
         if value:
             if not isinstance(value, str):
                 raise ValueError('runtime.' + key + ' must be a path string')
@@ -79,10 +133,12 @@ def relaunch(project, config, ffmpeg_override=None):
 def path_report(project, config):
     paths = resolve_paths(project, config)
     return {'configured': {k: {'path': p, 'exists': Path(p).exists()} for k,p in paths.items()},
+            'global_profile': {'path': str(global_runtime_path()), 'exists': global_runtime_path().exists(),
+                               'values': read_global_runtime()},
             'candidates': {'current_python': sys.executable, 'path_python': shutil.which('python'),
-                           'path_ffmpeg': shutil.which('ffmpeg'), 'FFMPEG': os.environ.get('FFMPEG'),
-                           **{key: os.environ.get(variable) for key,variable in ENV_PATHS.items()}},
-            'note': 'Candidates only. Ask the user to select paths before configuring a new project; not a whole-disk search.'}
+                           'path_python3': shutil.which('python3'), 'path_ffmpeg': shutil.which('ffmpeg'),
+                           **{name: os.environ.get(name) for names in ENV_CANDIDATES.values() for name in names}},
+            'note': 'Candidates only. Ask the user to select paths before configuring or remembering a runtime; not a whole-disk search.'}
 
 
 def doctor(project, config, needs_tts, ffmpeg_override=None):

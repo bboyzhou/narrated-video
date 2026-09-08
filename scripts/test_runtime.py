@@ -5,7 +5,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from runtime import launch_environment, resolve_paths, validate_paths, path_report, update_config
+from runtime import (launch_environment, resolve_paths, validate_paths, path_report,
+                     update_config, write_global_runtime, global_runtime_path)
 from pipeline import Project
 
 
@@ -15,6 +16,13 @@ class RuntimeTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.project = self.root / 'project.json'
+        self.env = patch.dict(os.environ, {
+            'CODEX_HOME': str(self.root / 'codex'),
+            'NARRATED_VIDEO_MELOTTS_PYTHON': '', 'NARRATED_VIDEO_FFMPEG': '', 'FFMPEG': '',
+            'NLTK_DATA': '', 'HF_HOME': '', 'HF_HUB_CACHE': '', 'TRANSFORMERS_CACHE': '',
+        })
+        self.env.start()
+        self.addCleanup(self.env.stop)
         for directory in ('nltk data', 'hf', 'hub', 'transformers'):
             (self.root / directory).mkdir()
 
@@ -54,6 +62,35 @@ class RuntimeTests(unittest.TestCase):
         with patch.dict(os.environ, {'NLTK_DATA': 'existing'}):
             _, env = launch_environment(self.project, {})
             self.assertEqual(env['NLTK_DATA'], 'existing')
+
+    def test_global_profile_is_reused_by_a_new_session(self):
+        executable = self.root / 'ffmpeg'
+        executable.write_bytes(b'test')
+        python = self.root / 'melo-python'
+        python.write_bytes(b'test')
+        write_global_runtime({'ffmpeg': str(executable), 'python': str(python),
+                              'nltk_data': str(self.root / 'nltk data'), 'hf_home': str(self.root / 'hf')})
+        paths = resolve_paths(self.project, {})
+        self.assertEqual(paths['ffmpeg'], str(executable))
+        self.assertEqual(paths['python'], str(python))
+        self.assertEqual(paths['nltk_data'], str(self.root / 'nltk data'))
+        self.assertEqual(global_runtime_path(), self.root / 'codex' / 'narrated-video' / 'runtime.json')
+
+    def test_project_runtime_overrides_global_profile(self):
+        old = self.root / 'old-ffmpeg'
+        new = self.root / 'new-ffmpeg'
+        old.write_bytes(b'old')
+        new.write_bytes(b'new')
+        write_global_runtime({'ffmpeg': str(old)})
+        paths = resolve_paths(self.project, {'ffmpeg': str(new)})
+        self.assertEqual(paths['ffmpeg'], str(new))
+
+    def test_global_profile_uses_unified_cache_root(self):
+        write_global_runtime({'hf_home': str(self.root / 'hf'), 'hf_hub_cache': str(self.root / 'old-hub')})
+        write_global_runtime({'hf_home': str(self.root / 'new-hf')})
+        profile = global_runtime_path().read_text(encoding='utf-8')
+        self.assertNotIn('old-hub', profile)
+        self.assertIn('new-hf', profile)
 
     def test_unified_cache_selection_clears_old_split_overrides(self):
         updated = update_config({'hf_home': 'old', 'hf_hub_cache': 'old-hub', 'transformers_cache': 'old-transformers'}, {'hf_home': 'new'})

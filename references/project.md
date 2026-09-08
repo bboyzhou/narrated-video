@@ -2,7 +2,7 @@
 
 脚本位置：本 skill 的 `scripts/pipeline.py`。使用现有 Python 3.10+，仅标准库；渲染需要带 libx264、libass、xfade、loudnorm 的 FFmpeg。配音生成需要已有 MeloTTS 或 CosyVoice 原生推理环境；也可直接使用逐句 WAV。首次使用先由用户选择软件和资源路径，不自动安装包。
 
-软件和资源路径的首次选择、字段优先级及诊断见 [运行环境](runtime.md)。同一项目路径已选定且有效时直接复用。
+软件和资源路径的首次选择、字段优先级及诊断见 [运行环境](runtime.md)。同一项目路径已选定且有效时直接复用；跨项目或跨 Agent 会话可在 `doctor` 成功后用 `remember-runtime` 保存已验证路径。
 
 ## 入口与交付
 
@@ -28,6 +28,8 @@ python $pipeline record $project --stage demo --quote '用户实际批准 Demo �
 python $pipeline render $project --stage full --ffmpeg $ffmpeg
 python $pipeline verify $project --stage full --ffmpeg $ffmpeg
 ```
+
+首次环境选择并通过 `doctor` 后，可运行 `python $pipeline remember-runtime $project`，让其他项目和 Agent 会话复用这些已验证路径。
 
 `record` 是记录器，不判断回复含义，也不代表用户已经批准。必须由 agent 根据实际对话填写。`--skip` 仅在用户明确跳过相应阶段时使用，`--quote` 保留原话与跳过范围。普通 Demo 批准要求当前配置已渲染，并检查样片文件未改变。测试项目中可使用明确标注的测试授权，但不能复制到真实项目。
 

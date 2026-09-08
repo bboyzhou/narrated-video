@@ -16,7 +16,8 @@ import sys
 import time
 import unicodedata
 import wave
-from runtime import resolve_paths, validate_paths, relaunch, path_report, doctor, update_config
+from runtime import (resolve_paths, validate_paths, relaunch, path_report, doctor,
+                     update_config, write_global_runtime)
 
 VERSION = 1
 
@@ -241,7 +242,7 @@ class Project:
                        'images': [self.asset(s['asset']) for s in shots], 'voices': voices,
                        'music': [(m, self.asset(m['path'])) for m in self.c.get('music', [])],
                        'mix': self.c.get('mix', {}),
-                       'runtime': self.c.get('runtime', {}),
+                       'runtime': {**self.c.get('runtime', {}), **self.runtime},
                        'renderer': [file_hash(__file__), file_hash(Path(__file__).with_name('runtime.py'))]})
 
     def gate(self, stage):
@@ -267,11 +268,12 @@ class Project:
         write_json(self.state_path, self.state)
 
     def ff(self, args, cwd=None):
-        require(self.ffmpeg, 'FFmpeg not found; pass --ffmpeg or set FFMPEG. No automatic installation.')
+        require(self.ffmpeg, 'FFmpeg not found; pass --ffmpeg, configure/remember-runtime, or set FFMPEG. No automatic installation.')
         return run([self.ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-y', *args], cwd)
 
     def cached(self, kind, inputs, suffix, producer):
-        key = digest({'kind': kind, 'inputs': inputs, 'runtime': self.c.get('runtime', {}), 'ffmpeg': self.ffmpeg,
+        key = digest({'kind': kind, 'inputs': inputs,
+                      'runtime': {**self.c.get('runtime', {}), **self.runtime}, 'ffmpeg': self.ffmpeg,
                       'renderer': [file_hash(__file__), file_hash(Path(__file__).with_name('runtime.py'))]})
         target = self.cache / (key + suffix)
         stamp = self.cache / (key + '.json')
@@ -580,7 +582,7 @@ def initialize(path, source):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['init', 'paths', 'configure', 'doctor', 'check', 'record', 'tts', 'render', 'verify'])
+    parser.add_argument('command', choices=['init', 'paths', 'configure', 'remember-runtime', 'doctor', 'check', 'record', 'tts', 'render', 'verify'])
     parser.add_argument('project', help='Project JSON path')
     parser.add_argument('--source', help='Input .txt/.md or directory (init only)')
     parser.add_argument('--stage', choices=['script', 'demo', 'full'], default='demo')
@@ -608,6 +610,17 @@ def main():
         config['runtime'] = updated
         write_json(args.project, config)
         print('Saved user-selected runtime paths. Run doctor to verify availability.')
+        return
+    if args.command == 'remember-runtime':
+        selected = {key: runtime_config[key] for key in ('python', 'ffmpeg', 'nltk_data', 'hf_home',
+                                                         'hf_hub_cache', 'transformers_cache')
+                    if key in runtime_config}
+        if not selected:
+            raise ValueError('Project runtime has no paths to remember; run configure first')
+        selected = resolve_paths(args.project, selected, include_global=False, include_environment=False)
+        validate_paths(selected)
+        profile, _ = write_global_runtime(selected)
+        print('Saved validated runtime paths to ' + str(profile))
         return
     relaunch(args.project, runtime_config, args.ffmpeg)
     if args.command == 'doctor':
