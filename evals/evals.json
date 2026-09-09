@@ -5,7 +5,7 @@
       "id": 1,
       "name": "new-project-draft",
       "prompt": "帮我把下面这段零散文案做成约45秒的图片解说视频：周五下午，我们把一周的进度贴上白板，大家轮流说完成了什么、哪里需要帮忙，下周再一起检查。希望画面温暖简洁。软件路径我还没选，也还没确认正式文案。请先完成现在能做的部分，把需要我决定的事一次说清楚。",
-      "expected_output": "完整口播候选稿、主要调整和合理时长估计，集中列出首次环境/风格选择；不生成配音/图片，不伪造批准。",
+      "expected_output": "先初始化并运行 paths/preflight；环境未选定或门禁失败时只集中说明所需路径和配音方式，不生成口播候选稿、制作方案、图片或配音。",
       "files": []
     },
     {
@@ -39,22 +39,22 @@
     {
       "id": 6,
       "name": "cross-session-runtime-reuse",
-      "prompt": "我已经在一个项目中确认了 MeloTTS Python、FFmpeg、NLTK 资源和 Hugging Face 模型缓存路径，并通过了 doctor。请把这套已验证环境保存为用户级运行环境，之后新项目和新的 Agent 会话可以直接复用；不要安装依赖、下载模型或修改系统 PATH。",
-      "expected_output": "先确认 doctor 结果，再使用 remember-runtime 保存跨平台用户级 runtime.json；说明项目配置、全局配置和环境变量的优先级，以及路径失效时需要重新选择。",
+      "prompt": "我已经在一个项目中确认了 MeloTTS Python、FFmpeg、NLTK 资源和 Hugging Face 模型缓存路径，并通过了 preflight。请把这套已验证环境保存为用户级运行环境，之后新项目和新的 Agent 会话可以直接复用；不要安装依赖、下载模型或修改系统 PATH。",
+      "expected_output": "确认当前 preflight 指纹有效，再使用 remember-runtime 保存跨平台用户级 runtime.json；说明项目配置、全局配置和环境变量的优先级，以及路径失效时需要重新检查。",
       "files": []
     },
     {
       "id": 7,
       "name": "storyboard-before-demo",
       "prompt": "这段口播稿我已经确认了，请直接做一个 Demo 给我看。",
-      "expected_output": "先提交制作纲要、完整逐镜分镜表、正负提示词、连续性设计、Demo 选段理由和验证目标等待批准；未获分镜批准前不生成图片、配音或 Demo。",
+      "expected_output": "先确认 preflight 有效；无效时停止并处理环境。通过后再提交制作纲要、完整逐镜分镜表、正负提示词、连续性设计、Demo 选段理由和验证目标等待批准；未获分镜批准前不生成图片、配音或 Demo。",
       "files": []
     },
     {
       "id": 8,
       "name": "storyboard-continuity-detail",
       "prompt": "把这段人物历史故事做成图片解说视频，之前的 Demo 经常出现人物服装和场景不连续。请先把制作方案给我确认。",
-      "expected_output": "制作纲要明确受众、平台、时长、叙事弧与视听方向；逐镜说明主体、动作、环境、景别、构图、光色和连续性锚点，并给出可执行的正负提示词及代表性 Demo 选择。",
+      "expected_output": "先运行并通过 preflight；通过后制作纲要明确受众、平台、时长、叙事弧与视听方向，逐镜说明主体、动作、环境、景别、构图、光色和连续性锚点，并给出可执行的正负提示词及代表性 Demo 选择。",
       "files": []
     }
   ]

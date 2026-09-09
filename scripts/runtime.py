@@ -3,9 +3,12 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import wave
 
 ENV_PATHS = {'nltk_data': 'NLTK_DATA', 'hf_home': 'HF_HOME',
              'hf_hub_cache': 'HF_HUB_CACHE', 'transformers_cache': 'TRANSFORMERS_CACHE'}
@@ -68,9 +71,12 @@ def resolve_paths(project, config, include_global=True, include_environment=True
     if include_global:
         sources.append(read_global_runtime())
     sources.append(config or {})
+    merged = {}
+    for source in sources:
+        merged = update_config(merged, source)
     result = {}
     for key in PATH_KEYS:
-        value = next((source.get(key) for source in reversed(sources) if source.get(key)), None)
+        value = merged.get(key)
         if value:
             if not isinstance(value, str):
                 raise ValueError('runtime.' + key + ' must be a path string')
@@ -141,10 +147,14 @@ def path_report(project, config):
             'note': 'Candidates only. Ask the user to select paths before configuring or remembering a runtime; not a whole-disk search.'}
 
 
-def doctor(project, config, needs_tts, ffmpeg_override=None):
+def doctor(project, config, voice, ffmpeg_override=None, deep=False):
     report = path_report(project, config)
     paths = resolve_paths(project, config)
     ffmpeg = ffmpeg_override or paths.get('ffmpeg') or os.environ.get('FFMPEG') or shutil.which('ffmpeg')
+    if isinstance(voice, bool):
+        voice = {'engine': 'melotts' if voice else 'files'}
+    voice = voice or {'engine': 'files'}
+    engine = voice.get('engine', 'files')
     checks = []
     def check(name, action):
         try:
@@ -152,13 +162,26 @@ def doctor(project, config, needs_tts, ffmpeg_override=None):
             checks.append({'name': name, 'ok': True, 'detail': detail})
         except Exception as error:
             checks.append({'name': name, 'ok': False, 'detail': str(error)})
-    def ff_version():
+    def ffmpeg_runtime():
         if not ffmpeg:
             raise ValueError('FFmpeg not found; select its executable')
-        result = subprocess.run([ffmpeg, '-version'], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=20, check=True)
-        return result.stdout.splitlines()[0]
-    check('ffmpeg', ff_version)
-    if needs_tts:
+        version = subprocess.run([ffmpeg, '-version'], capture_output=True, text=True, encoding='utf-8',
+                                 errors='replace', timeout=20, check=True).stdout.splitlines()[0]
+        filters = subprocess.run([ffmpeg, '-hide_banner', '-filters'], capture_output=True, text=True,
+                                 encoding='utf-8', errors='replace', timeout=20, check=True).stdout
+        encoders = subprocess.run([ffmpeg, '-hide_banner', '-encoders'], capture_output=True, text=True,
+                                  encoding='utf-8', errors='replace', timeout=20, check=True).stdout
+        required_filters = ('perspective', 'xfade', 'subtitles', 'loudnorm', 'dynaudnorm',
+                            'sidechaincompress', 'alimiter')
+        required_encoders = ('libx264', 'aac')
+        missing_filters = [name for name in required_filters if not re.search(r'\b' + re.escape(name) + r'\b', filters)]
+        missing_encoders = [name for name in required_encoders if not re.search(r'\b' + re.escape(name) + r'\b', encoders)]
+        if missing_filters or missing_encoders:
+            raise ValueError('FFmpeg lacks required capabilities: filters=' + str(missing_filters) +
+                             ', encoders=' + str(missing_encoders))
+        return {'version': version, 'filters': list(required_filters), 'encoders': list(required_encoders)}
+    check('ffmpeg', ffmpeg_runtime)
+    if engine == 'melotts':
         def melo_module():
             spec = importlib.util.find_spec('melo')
             if spec is None:
@@ -171,6 +194,78 @@ def doctor(project, config, needs_tts, ffmpeg_override=None):
             found = {name: str(nltk.data.find(name)) for name in ('corpora/cmudict.zip', 'taggers/averaged_perceptron_tagger.zip')}
             return {'paths': found, 'dictionary_entries': len(cmudict.entries())}
         check('nltk_resources', nltk_resources)
+        if deep:
+            def melo_model_cache():
+                language = str(voice.get('language', 'ZH'))
+                device = str(voice.get('device', 'cpu'))
+                speaker = str(voice.get('speaker', 'ZH'))
+                code = (
+                    "import json,sys\n"
+                    "from melo.api import TTS\n"
+                    "model=TTS(language=sys.argv[1], device=sys.argv[2])\n"
+                    "speaker=sys.argv[3]\n"
+                    "assert speaker in model.hps.data.spk2id, 'Unknown MeloTTS speaker: '+speaker\n"
+                    "print(json.dumps({'language':sys.argv[1],'device':sys.argv[2],'speaker':speaker}))\n"
+                )
+                env = os.environ.copy()
+                env['HF_HUB_OFFLINE'] = env['TRANSFORMERS_OFFLINE'] = '1'
+                result = subprocess.run([sys.executable, '-c', code, language, device, speaker], env=env,
+                                        capture_output=True, text=True, encoding='utf-8', errors='replace',
+                                        timeout=180)
+                if result.returncode:
+                    raise ValueError('MeloTTS offline model load failed: ' +
+                                     (result.stderr or result.stdout)[-4000:])
+                return json.loads(result.stdout.splitlines()[-1])
+            check('melotts_model_cache', melo_model_cache)
+    elif engine == 'cosyvoice':
+        def cosyvoice_configuration():
+            command = voice.get('command')
+            if not isinstance(command, list) or not command:
+                raise ValueError('CosyVoice requires voice.command')
+            if '{output}' not in command or ('{text_file}' not in command and '{text}' not in command):
+                raise ValueError('CosyVoice command requires {output} and {text_file} or {text}')
+            model_path = Path(str(voice.get('model_path', ''))).expanduser()
+            if not model_path.is_absolute():
+                model_path = Path(project).resolve().parent / model_path
+            if not model_path.exists():
+                raise ValueError('CosyVoice model_path unavailable: ' + str(model_path))
+            return {'model_path': str(model_path.resolve()), 'command': [str(item) for item in command]}
+        check('cosyvoice_configuration', cosyvoice_configuration)
+        if deep and checks[-1]['ok']:
+            def cosyvoice_sample():
+                with tempfile.TemporaryDirectory(prefix='narrated-preflight-') as temporary:
+                    root = Path(temporary)
+                    text_file = root / 'input.txt'
+                    output = root / 'output.wav'
+                    text = '运行环境测试。'
+                    text_file.write_text(text, encoding='utf-8')
+                    model_path = Path(str(voice['model_path'])).expanduser()
+                    if not model_path.is_absolute():
+                        model_path = Path(project).resolve().parent / model_path
+                    argv = []
+                    for item in voice['command']:
+                        value = str(item).replace('{text_file}', str(text_file)).replace('{output}', str(output))
+                        value = value.replace('{model_path}', str(model_path.resolve())).replace('{text}', text)
+                        argv.append(value)
+                    env = os.environ.copy()
+                    env['HF_HUB_OFFLINE'] = env['TRANSFORMERS_OFFLINE'] = '1'
+                    result = subprocess.run(argv, cwd=str(Path(project).resolve().parent), env=env,
+                                            capture_output=True, text=True, encoding='utf-8',
+                                            errors='replace', timeout=180)
+                    if result.returncode:
+                        raise ValueError('CosyVoice preflight failed: ' +
+                                         (result.stderr or result.stdout)[-4000:])
+                    if not output.is_file() or output.stat().st_size == 0:
+                        raise ValueError('CosyVoice preflight did not create a WAV')
+                    with wave.open(str(output), 'rb') as audio:
+                        if audio.getnframes() <= 0 or audio.getcomptype() != 'NONE':
+                            raise ValueError('CosyVoice preflight requires nonempty PCM WAV output')
+                    return {'sample': 'passed', 'format': 'PCM WAV'}
+            check('cosyvoice_sample', cosyvoice_sample)
+    elif engine != 'files':
+        checks.append({'name': 'voice_engine', 'ok': False, 'detail': 'Unsupported voice.engine: ' + str(engine)})
     report.update({'checks': checks, 'ok': all(c['ok'] for c in checks),
-                   'limits': 'No TTS model import, model download or synthesis. Run an approved short sample to validate model loading and voice output.'})
+                   'mode': 'preflight' if deep else 'doctor',
+                   'limits': ('Offline model load/sample completed; no media assets were produced.' if deep else
+                              'No TTS model import, model download or synthesis. Run preflight before creative planning.')})
     return report

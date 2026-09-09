@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pipeline import Project, initialize, read_json, write_json
+from pipeline import Project, initialize, preflight_fingerprint, preflight_path, read_json, write_json
 from test_pipeline import storyboard_for
 
 
@@ -30,6 +30,11 @@ class StoryboardTests(unittest.TestCase):
         config['demo'] = {'shots': ['S1', 'S2']}
         write_json(self.root / 'storyboard.json', storyboard_for(config['shots']))
         write_json(self.project_path, config)
+        write_json(preflight_path(self.project_path), {
+            'ok': True,
+            'fingerprint': preflight_fingerprint(self.project_path, config),
+            'test_fixture': True,
+        })
 
     def project(self):
         return Project(self.project_path)
@@ -41,6 +46,18 @@ class StoryboardTests(unittest.TestCase):
             project.gate('demo')
         project.record('storyboard', 'TEST FIXTURE: approve storyboard')
         self.project().gate('demo')
+
+    def test_preflight_is_required_before_script_approval(self):
+        preflight_path(self.project_path).unlink()
+        with self.assertRaisesRegex(ValueError, 'Preflight'):
+            self.project().record('script', 'TEST FIXTURE: approve script')
+
+    def test_voice_change_invalidates_preflight(self):
+        config = read_json(self.project_path)
+        config['voice'] = {'engine': 'files', 'revision': 'changed'}
+        write_json(self.project_path, config)
+        with self.assertRaisesRegex(ValueError, 'Preflight'):
+            self.project().require_preflight()
 
     def test_script_can_be_approved_before_shots_exist(self):
         config = read_json(self.project_path)

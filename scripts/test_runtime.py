@@ -1,12 +1,13 @@
 """Path resolution and process environment regression tests; no downloads."""
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from runtime import (launch_environment, resolve_paths, validate_paths, path_report,
-                     update_config, write_global_runtime, global_runtime_path)
+                     update_config, write_global_runtime, global_runtime_path, doctor)
 from pipeline import Project
 
 
@@ -92,6 +93,16 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn('old-hub', profile)
         self.assertIn('new-hf', profile)
 
+    def test_project_unified_cache_suppresses_global_split_caches(self):
+        write_global_runtime({'hf_home': str(self.root / 'hf'),
+                              'hf_hub_cache': str(self.root / 'hub'),
+                              'transformers_cache': str(self.root / 'transformers')})
+        (self.root / 'project-hf').mkdir()
+        paths = resolve_paths(self.project, {'hf_home': str(self.root / 'project-hf')})
+        self.assertEqual(paths['hf_home'], str(self.root / 'project-hf'))
+        self.assertNotIn('hf_hub_cache', paths)
+        self.assertNotIn('transformers_cache', paths)
+
     def test_unified_cache_selection_clears_old_split_overrides(self):
         updated = update_config({'hf_home': 'old', 'hf_hub_cache': 'old-hub', 'transformers_cache': 'old-transformers'}, {'hf_home': 'new'})
         self.assertEqual(updated, {'hf_home': 'new'})
@@ -108,6 +119,29 @@ class RuntimeTests(unittest.TestCase):
         first = project.script_key()
         project.c['narration'][0]['audio'] = 'b.wav'
         self.assertEqual(first, project.script_key())
+
+    def test_preflight_fails_early_without_ffmpeg(self):
+        report = doctor(self.project, {}, {'engine': 'files'}, deep=True)
+        self.assertFalse(report['ok'])
+        self.assertIn('FFmpeg not found', report['checks'][0]['detail'])
+
+    def test_preflight_checks_required_ffmpeg_capabilities(self):
+        executable = self.root / 'ffmpeg'
+        executable.write_bytes(b'test')
+        filters = 'perspective xfade subtitles loudnorm dynaudnorm sidechaincompress alimiter'
+        encoders = 'libx264 aac'
+        def fake_run(command, **kwargs):
+            if '-version' in command:
+                output = 'ffmpeg version test\n'
+            elif '-filters' in command:
+                output = filters
+            else:
+                output = encoders
+            return subprocess.CompletedProcess(command, 0, stdout=output, stderr='')
+        with patch('runtime.subprocess.run', side_effect=fake_run):
+            report = doctor(self.project, {'ffmpeg': str(executable)}, {'engine': 'files'}, deep=True)
+        self.assertTrue(report['ok'])
+        self.assertEqual(report['checks'][0]['detail']['version'], 'ffmpeg version test')
 
 
 if __name__ == '__main__':

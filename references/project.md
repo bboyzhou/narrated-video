@@ -2,7 +2,7 @@
 
 脚本位置：本 skill 的 `scripts/pipeline.py`。使用现有 Python 3.10+，仅标准库；渲染需要带 libx264、libass、xfade、loudnorm 的 FFmpeg。配音生成需要已有 MeloTTS 或 CosyVoice 原生推理环境；也可直接使用逐句 WAV。首次使用先由用户选择软件和资源路径，不自动安装包。
 
-软件和资源路径的首次选择、字段优先级及诊断见 [运行环境](runtime.md)。同一项目路径已选定且有效时直接复用；跨项目或跨 Agent 会话可在 `doctor` 成功后用 `remember-runtime` 保存已验证路径。
+软件和资源路径的首次选择、字段优先级及诊断见 [运行环境](runtime.md)。同一项目路径已选定且有效时直接复用；跨项目或跨 Agent 会话可在 `preflight` 成功后用 `remember-runtime` 保存已验证路径。
 
 ## 入口与交付
 
@@ -12,11 +12,14 @@ $pipeline = 'D:/workspace/narrated-video/scripts/pipeline.py'
 $project = 'D:/videos/example/project.json'
 $ffmpeg = 'D:/tools/ffmpeg.exe'
 python $pipeline init $project --source 'D:/documents/source.md'
+python $pipeline paths $project
+python $pipeline configure $project --python 'D:/tools/MeloTTS/.venv/Scripts/python.exe' --ffmpeg $ffmpeg --nltk-data 'D:/resources/nltk-data' --hf-home 'D:/resources/huggingface-cache' --offline true
+python $pipeline preflight $project
 ```
 
 `init` 只复制原文并建立空配置，不把 Markdown 标题等自动转成口播。也可省略 `--source`，由 agent 将对话文案以 UTF-8 保存为项目 `source.txt`。目录输入必须恰好包含一个 `.txt`/`.md`，多个时明确选择。现有项目不会被覆盖。
 
-用户批准完整改写稿后，将纯口播文字写入 `approved-script.txt`，将自然短句配置到 `narration`。脚本检查去除空白后的内容完全一致，标点仍须一致。不要把说明、标题、批准回复混入该文件。然后按 [分镜设计与审批](storyboard.md) 完成 `storyboard.json` 和项目 `shots`，向用户展示完整审阅稿并获得分镜批准。
+只有 `preflight` 通过后才开始整理文案和制作方案。用户批准完整改写稿后，将纯口播文字写入 `approved-script.txt`，将自然短句配置到 `narration`。脚本检查去除空白后的内容完全一致，标点仍须一致。不要把说明、标题、批准回复混入该文件。然后按 [分镜设计与审批](storyboard.md) 完成 `storyboard.json` 和项目 `shots`，向用户展示完整审阅稿并获得分镜批准。
 
 ```powershell
 python $pipeline check $project --stage script
@@ -32,11 +35,11 @@ python $pipeline render $project --stage full --ffmpeg $ffmpeg
 python $pipeline verify $project --stage full --ffmpeg $ffmpeg
 ```
 
-首次环境选择并通过 `doctor` 后，可运行 `python $pipeline remember-runtime $project`，让其他项目和 Agent 会话复用这些已验证路径。
+首次环境选择并通过 `preflight` 后，可运行 `python $pipeline remember-runtime $project`，让其他项目和 Agent 会话复用这些已验证路径。
 
 `record` 是记录器，不判断回复含义，也不代表用户已经批准。必须由 agent 根据实际对话填写。`--skip` 仅在用户明确跳过相应阶段时使用，`--quote` 保留原话与跳过范围。分镜审批无需先渲染，但必须已有完整且通过 `check` 的分镜；普通 Demo 批准要求当前配置已渲染，并检查样片文件未改变。测试项目中可使用明确标注的测试授权，但不能复制到真实项目。
 
-分镜未批准时，任何 `tts/render` 都拒绝执行；Demo 未批准时，`tts/render --stage full` 拒绝执行。Demo 模式只处理选中的镜头，不要求其他镜头的图片/音频已存在。项目目录 `.narrated-video/state.json` 保存批准和渲染记录；`.narrated-video/cache/` 保存缓存。不要并发渲染同一项目。
+preflight 未通过或因运行环境/配音配置变化而失效时，`check`、`record`、`tts`、`render` 和 `verify` 都拒绝执行；分镜未批准时，任何 `tts/render` 都拒绝执行；Demo 未批准时，`tts/render --stage full` 拒绝执行。Demo 模式只处理选中的镜头，不要求其他镜头的图片/音频已存在。项目目录 `.narrated-video/preflight.json` 保存环境门禁，`.narrated-video/state.json` 保存批准和渲染记录，`.narrated-video/cache/` 保存缓存。不要并发渲染同一项目。
 
 产物在 `deliverables/`：`demo.mp4` 或 `full.mp4`、同名 SRT、时间轴、素材清单、验证报告、3 张抽帧、项目配置、完整 `storyboard.json` 和批准记录副本。项目副本保留原项目的相对路径；可移交的完整项目应连同原项目目录、素材、源文件和缓存配音一起复制，单独复制 deliverables 不是可移植工程。
 

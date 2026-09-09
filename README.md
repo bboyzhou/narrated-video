@@ -12,15 +12,15 @@
 python scripts/pipeline.py init D:/videos/example/project.json --source D:/documents/source.md
 python scripts/pipeline.py paths D:/videos/example/project.json
 python scripts/pipeline.py configure D:/videos/example/project.json --python D:/tools/python.exe --ffmpeg D:/tools/ffmpeg.exe --offline true
-python scripts/pipeline.py doctor D:/videos/example/project.json
+python scripts/pipeline.py preflight D:/videos/example/project.json
+python scripts/pipeline.py remember-runtime D:/videos/example/project.json
 python scripts/pipeline.py check D:/videos/example/project.json --stage script
 python scripts/pipeline.py record D:/videos/example/project.json --stage script --quote "用户实际批准回复"
 python scripts/pipeline.py check D:/videos/example/project.json
 python scripts/pipeline.py record D:/videos/example/project.json --stage storyboard --quote "用户实际批准回复"
-python scripts/pipeline.py remember-runtime D:/videos/example/project.json
 ```
 
-`remember-runtime` 会把已验证的运行环境保存到用户级配置，供后续项目和 Agent 会话复用；不会自动安装依赖或下载模型。
+`preflight` 必须在文案和制作方案前通过；`remember-runtime` 会把通过门禁的运行环境保存到用户级配置，供后续项目和 Agent 会话复用。两者都不会自动安装依赖或下载模型。
 
 不自动安装依赖或下载模型。测试使用隔离临时工程：
 

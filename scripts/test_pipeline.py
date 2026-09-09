@@ -12,7 +12,8 @@ import struct
 import tempfile
 import wave
 
-from pipeline import Project, initialize, write_json, read_json
+from pipeline import (Project, initialize, preflight_fingerprint, preflight_path,
+                      write_json, read_json)
 
 
 def rejected(action, message):
@@ -85,6 +86,12 @@ def main():
     write_json(root / 'storyboard.json', storyboard_for(c['shots']))
     write_json(project_file, c)
     p = lambda: Project(project_file, args.ffmpeg)
+    rejected(lambda: p().render('demo'), 'Preflight')
+    write_json(preflight_path(project_file), {
+        'ok': True,
+        'fingerprint': preflight_fingerprint(project_file, c, args.ffmpeg),
+        'test_fixture': True,
+    })
     rejected(lambda: p().render('demo'), 'Script approval')
     p().record('script', 'TEST FIXTURE ONLY: approve script')
     rejected(lambda: p().render('demo'), 'Storyboard approval')
@@ -147,7 +154,7 @@ def main():
     done.write_text('corrupt', encoding='utf-8')
     done = q.cached('test-failure', {}, '.txt', lambda target: target.write_text('recovered', encoding='utf-8'))
     assert done.read_text(encoding='utf-8') == 'recovered'
-    report = {'passed': True, 'project': str(project_file), 'checks': ['init refuses overwrite', 'script gate', 'storyboard gate', 'Demo gate', 'Demo approval requires artifact', 'Demo without remaining assets', 'real decode and frame counts', 'no-change cache reuse', 'non-Demo storyboard reapproval preserves Demo', 'same-path image invalidation', 'Demo content invalidation', 'Demo music offset invalidation', 'script invalidation', 'failed step recovery', 'cache corruption recovery'], 'demo_frames': 67, 'full_frames': 103, 'image_change_cache': changed,
+    report = {'passed': True, 'project': str(project_file), 'checks': ['init refuses overwrite', 'preflight gate', 'script gate', 'storyboard gate', 'Demo gate', 'Demo approval requires artifact', 'Demo without remaining assets', 'real decode and frame counts', 'no-change cache reuse', 'non-Demo storyboard reapproval preserves Demo', 'same-path image invalidation', 'Demo content invalidation', 'Demo music offset invalidation', 'script invalidation', 'failed step recovery', 'cache corruption recovery'], 'demo_frames': 67, 'full_frames': 103, 'image_change_cache': changed,
               'limitations': 'Synthetic tone audio; not a speech quality or full-length performance test'}
     write_json(root / 'test-results.json', report)
     print(json.dumps(report, ensure_ascii=False))

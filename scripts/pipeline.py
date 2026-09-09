@@ -185,6 +185,31 @@ def run(command, cwd=None):
     return result
 
 
+def preflight_path(project):
+    return Path(project).resolve().parent / '.narrated-video' / 'preflight.json'
+
+
+def _executable_identity(value):
+    if not value:
+        return None
+    path = Path(value).resolve()
+    if not path.is_file():
+        return {'path': str(path), 'exists': False}
+    stat = path.stat()
+    return {'path': str(path), 'exists': True, 'size': stat.st_size, 'mtime_ns': stat.st_mtime_ns}
+
+
+def preflight_fingerprint(project, config, ffmpeg_override=None):
+    runtime_config = config.get('runtime', {})
+    paths = resolve_paths(project, runtime_config)
+    ffmpeg = str(Path(ffmpeg_override).resolve()) if ffmpeg_override else paths.get('ffmpeg') or os.environ.get('FFMPEG') or shutil.which('ffmpeg')
+    return digest({'schema': 1,
+                   'runtime': {**runtime_config, **paths},
+                   'python': _executable_identity(paths.get('python') or sys.executable),
+                   'ffmpeg': _executable_identity(ffmpeg),
+                   'voice': config.get('voice', {})})
+
+
 class Project:
     def __init__(self, path, ffmpeg=None, validation_stage='production'):
         self.path = Path(path).resolve()
@@ -193,11 +218,21 @@ class Project:
         self.work = self.root / '.narrated-video'
         self.cache = self.work / 'cache'
         self.state_path = self.work / 'state.json'
+        self.preflight_path = preflight_path(self.path)
         self.state = read_json(self.state_path) if self.state_path.exists() else {}
         self.runtime = resolve_paths(self.path, self.c.get('runtime', {}))
         self.ffmpeg = str(Path(ffmpeg).resolve()) if ffmpeg else self.runtime.get('ffmpeg') or os.environ.get('FFMPEG') or shutil.which('ffmpeg')
         self.stats = {'rendered': 0, 'reused': 0}
+        self.require_preflight()
         self.validate(validation_stage)
+
+    def preflight_key(self):
+        return preflight_fingerprint(self.path, self.c, self.ffmpeg)
+
+    def require_preflight(self):
+        record = read_json(self.preflight_path) if self.preflight_path.is_file() else {}
+        require(record.get('ok') and record.get('fingerprint') == self.preflight_key(),
+                'Preflight missing or stale; run preflight before script or storyboard planning')
 
     def path_for(self, value):
         p = Path(value)
@@ -409,6 +444,7 @@ class Project:
                        'renderer': [file_hash(__file__), file_hash(Path(__file__).with_name('runtime.py'))]})
 
     def gate(self, stage):
+        self.require_preflight()
         record = self.state.get('script', {})
         require(record.get('fingerprint') == self.script_key(), 'Script approval missing or stale; obtain user approval and record it')
         if stage in ('demo', 'full'):
@@ -419,6 +455,7 @@ class Project:
             require(self.state.get('demo', {}).get('fingerprint') == self.demo_key(), 'Demo approval missing or stale; render and approve a new Demo')
 
     def record(self, stage, quote, skip=False):
+        self.require_preflight()
         require(quote.strip(), 'Record the actual user reply')
         if stage == 'script':
             key = self.script_key()
@@ -679,6 +716,7 @@ class Project:
         return '\n'.join(entries)
 
     def verify(self, stage):
+        self.gate(stage)
         destination = self.root / 'deliverables'
         artifact = destination / (stage + '.mp4')
         timeline = read_json(destination / (stage + '-timeline.json'))
@@ -745,12 +783,12 @@ def initialize(path, source):
                       'subtitles': {'enabled': True, 'font': 'Microsoft YaHei', 'size': 48, 'min_size': 28, 'max_width_ratio': 0.88, 'margin': 30, 'max_chars': 24},
                       'motion': {'easing': 'smoothstep', 'max_zoom': 0.06},
                       'narration': [], 'shots': [], 'demo': {'shots': []}, 'music': []})
-    print('Created ' + str(path) + '; approve the spoken script, then prepare and approve storyboard.json before production.')
+    print('Created ' + str(path) + '; run preflight before drafting the spoken script or production plan.')
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['init', 'paths', 'configure', 'remember-runtime', 'doctor', 'check', 'record', 'tts', 'render', 'verify'])
+    parser.add_argument('command', choices=['init', 'paths', 'configure', 'remember-runtime', 'doctor', 'preflight', 'check', 'record', 'tts', 'render', 'verify'])
     parser.add_argument('project', help='Project JSON path')
     parser.add_argument('--source', help='Input .txt/.md or directory (init only)')
     parser.add_argument('--stage', choices=['script', 'storyboard', 'demo', 'full'], default='demo')
@@ -777,7 +815,7 @@ def main():
         validate_paths(resolve_paths(args.project, updated))
         config['runtime'] = updated
         write_json(args.project, config)
-        print('Saved user-selected runtime paths. Run doctor to verify availability.')
+        print('Saved user-selected runtime paths. Run preflight before drafting script or production plans.')
         return
     if args.command == 'remember-runtime':
         selected = {key: runtime_config[key] for key in ('python', 'ffmpeg', 'nltk_data', 'hf_home',
@@ -787,12 +825,20 @@ def main():
             raise ValueError('Project runtime has no paths to remember; run configure first')
         selected = resolve_paths(args.project, selected, include_global=False, include_environment=False)
         validate_paths(selected)
+        readiness = read_json(preflight_path(args.project)) if preflight_path(args.project).is_file() else {}
+        require(readiness.get('ok') and readiness.get('fingerprint') == preflight_fingerprint(args.project, config, args.ffmpeg),
+                'Run a successful current preflight before remember-runtime')
         profile, _ = write_global_runtime(selected)
         print('Saved validated runtime paths to ' + str(profile))
         return
     relaunch(args.project, runtime_config, args.ffmpeg)
-    if args.command == 'doctor':
-        report = doctor(args.project, runtime_config, config.get('voice', {}).get('engine') == 'melotts', args.ffmpeg)
+    if args.command in ('doctor', 'preflight'):
+        report = doctor(args.project, runtime_config, config.get('voice', {}), args.ffmpeg,
+                        deep=args.command == 'preflight')
+        if args.command == 'preflight':
+            report['fingerprint'] = preflight_fingerprint(args.project, config, args.ffmpeg)
+            report['checked_at'] = time.strftime('%Y-%m-%dT%H:%M:%S%z')
+            write_json(preflight_path(args.project), report)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         if not report['ok']:
             raise SystemExit(1)
@@ -800,6 +846,7 @@ def main():
     validation_stage = 'script' if args.stage == 'script' and args.command in ('check', 'record') else 'production'
     project = Project(args.project, args.ffmpeg, validation_stage)
     if args.command == 'check':
+        project.require_preflight()
         audit = pronunciation_audit(config.get('narration', []))
         report = {'schema': 'passed', 'pronunciation_audit': audit,
                   'note': 'Polyphone hits require listening confirmation; use sentence.pronunciation for pronunciation-only correction, or tts_text for an engine-specific override.'}
