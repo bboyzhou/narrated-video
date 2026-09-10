@@ -143,6 +143,42 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(report['ok'])
         self.assertEqual(report['checks'][0]['detail']['version'], 'ffmpeg version test')
 
+    def test_doctor_accepts_cosyvoice_batch_command(self):
+        executable = self.root / 'ffmpeg'
+        executable.write_bytes(b'test')
+        model = self.root / 'cosyvoice-model'
+        model.mkdir()
+        filters = 'perspective xfade subtitles loudnorm dynaudnorm sidechaincompress alimiter'
+        encoders = 'libx264 aac'
+        def fake_run(command, **kwargs):
+            if '-version' in command:
+                output = 'ffmpeg version test\n'
+            elif '-filters' in command:
+                output = filters
+            else:
+                output = encoders
+            return subprocess.CompletedProcess(command, 0, stdout=output, stderr='')
+        voice = {'engine': 'cosyvoice', 'model_path': str(model),
+                 'command': ['python', 'single.py', '{text_file}', '{output}'],
+                 'batch_command': ['python', 'batch.py', '{jobs_file}']}
+        with patch('runtime.subprocess.run', side_effect=fake_run):
+            report = doctor(self.project, {'ffmpeg': str(executable)}, voice)
+        self.assertTrue(report['ok'], report)
+        detail = next(item['detail'] for item in report['checks']
+                      if item['name'] == 'cosyvoice_configuration')
+        self.assertEqual(detail['batch_command'], voice['batch_command'])
+
+    def test_doctor_rejects_batch_command_without_jobs_file(self):
+        model = self.root / 'cosyvoice-model'
+        model.mkdir()
+        voice = {'engine': 'cosyvoice', 'model_path': str(model),
+                 'command': ['python', 'single.py', '{text_file}', '{output}'],
+                 'batch_command': ['python', 'batch.py']}
+        report = doctor(self.project, {}, voice)
+        detail = next(item['detail'] for item in report['checks']
+                      if item['name'] == 'cosyvoice_configuration')
+        self.assertIn('{jobs_file}', detail)
+
 
 if __name__ == '__main__':
     unittest.main()

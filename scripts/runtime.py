@@ -224,12 +224,21 @@ def doctor(project, config, voice, ffmpeg_override=None, deep=False):
                 raise ValueError('CosyVoice requires voice.command')
             if '{output}' not in command or ('{text_file}' not in command and '{text}' not in command):
                 raise ValueError('CosyVoice command requires {output} and {text_file} or {text}')
+            batch_command = voice.get('batch_command')
+            if batch_command is not None:
+                if not isinstance(batch_command, list) or not batch_command:
+                    raise ValueError('CosyVoice batch_command must be a nonempty argv list')
+                if not any('{jobs_file}' in str(item) for item in batch_command):
+                    raise ValueError('CosyVoice batch_command requires {jobs_file}')
             model_path = Path(str(voice.get('model_path', ''))).expanduser()
             if not model_path.is_absolute():
                 model_path = Path(project).resolve().parent / model_path
             if not model_path.exists():
                 raise ValueError('CosyVoice model_path unavailable: ' + str(model_path))
-            return {'model_path': str(model_path.resolve()), 'command': [str(item) for item in command]}
+            detail = {'model_path': str(model_path.resolve()), 'command': [str(item) for item in command]}
+            if batch_command is not None:
+                detail['batch_command'] = [str(item) for item in batch_command]
+            return detail
         check('cosyvoice_configuration', cosyvoice_configuration)
         if deep and checks[-1]['ok']:
             def cosyvoice_sample():
@@ -237,15 +246,31 @@ def doctor(project, config, voice, ffmpeg_override=None, deep=False):
                     root = Path(temporary)
                     text_file = root / 'input.txt'
                     output = root / 'output.wav'
+                    jobs_file = root / 'jobs.json'
                     text = '运行环境测试。'
                     text_file.write_text(text, encoding='utf-8')
                     model_path = Path(str(voice['model_path'])).expanduser()
                     if not model_path.is_absolute():
                         model_path = Path(project).resolve().parent / model_path
+                    command = voice.get('batch_command') or voice['command']
+                    if voice.get('batch_command'):
+                        jobs_file.write_text(json.dumps({'version': 1,
+                                                         'offline': bool(runtime.get('offline', False)),
+                                                         'jobs': [{'id': 'preflight', 'text': text,
+                                                                   'output': str(output)}]},
+                                                        ensure_ascii=False, indent=2), encoding='utf-8')
                     argv = []
-                    for item in voice['command']:
+                    for item in command:
                         value = str(item).replace('{text_file}', str(text_file)).replace('{output}', str(output))
+                        value = value.replace('{jobs_file}', str(jobs_file))
                         value = value.replace('{model_path}', str(model_path.resolve())).replace('{text}', text)
+                        value = value.replace('{speaker}', str(voice.get('speaker', '中文男')))
+                        value = value.replace('{speed}', str(voice.get('speed', 1)))
+                        if '{ffmpeg}' in value:
+                            ffmpeg = runtime.get('ffmpeg')
+                            if not ffmpeg:
+                                raise ValueError('CosyVoice batch_command uses {ffmpeg}, but FFmpeg is unavailable')
+                            value = value.replace('{ffmpeg}', str(ffmpeg))
                         argv.append(value)
                     env = os.environ.copy()
                     env['HF_HUB_OFFLINE'] = env['TRANSFORMERS_OFFLINE'] = '1'
@@ -260,7 +285,8 @@ def doctor(project, config, voice, ffmpeg_override=None, deep=False):
                     with wave.open(str(output), 'rb') as audio:
                         if audio.getnframes() <= 0 or audio.getcomptype() != 'NONE':
                             raise ValueError('CosyVoice preflight requires nonempty PCM WAV output')
-                    return {'sample': 'passed', 'format': 'PCM WAV'}
+                    return {'sample': 'passed', 'format': 'PCM WAV',
+                            'mode': 'batch' if voice.get('batch_command') else 'single'}
             check('cosyvoice_sample', cosyvoice_sample)
     elif engine != 'files':
         checks.append({'name': 'voice_engine', 'ok': False, 'detail': 'Unsupported voice.engine: ' + str(engine)})

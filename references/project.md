@@ -87,7 +87,8 @@ preflight 未通过或因运行环境/配音配置变化而失效时，`check`�
 - `voice.engine` 为 `melotts` 或 `files`。每句可提供 `audio: "audio/N001.wav"` 覆盖 TTS，也可提供 `tts_text` 只覆盖 TTS 输入而保留字幕原文；优先记录 `pronunciation`（含 `text`/`proxy`/`reading`）或 `pronunciation_note`，若引擎不支持音素输入，再使用同音同调代理字，禁止改写语义，必须为非空 PCM WAV。只有整段录音时，先取得可靠分句对齐，再用实际边界切成逐句 WAV；不支持按字数猜时间。
 - 人声选择先询问场景、性别呈现、年龄感、粗犷/细腻、沉稳/激昂和语速，列出可试听的 MeloTTS speaker、本地 WAV 或有明确授权的在线候选；用户试听选定后才生成或下载。记录候选试听链接、许可、选择原话和哈希；不得从影视/名人音频推断或克隆身份。MeloTTS 的音色描述只是偏好，不能保证实际模型表现。
 - 生成配音前运行 `check` 发音审计；命中多音字（如“率军”“长安”“行军”“将军”等）或历史专名时，必须试听确认。模型误读时先尝试音素/读音标注；引擎不支持时在句子上增加仅供 TTS 的 `tts_text` 发音代理，只修正读法，字幕仍取 `text`；不要直接改批准稿来迁就模型。
-- CosyVoice 通过 `voice.engine: "cosyvoice"` 接入。它使用用户选择的原生推理命令逐句生成 WAV，不自动安装依赖或下载权重。`voice.command` 是 argv 数组，必须包含 `{text_file}`（UTF-8 文本临时文件）或 `{text}`，以及 `{output}`（目标 WAV），例如 `["D:/envs/cosyvoice/python.exe", "tools/infer.py", "--model", "{model_path}", "--text-file", "{text_file}", "--output", "{output}"]`；实际命令需按所选 CosyVoice 版本调整。配置还需有 `provider: "cosyvoice"`、`model`、`model_path`、`license` 和 `revision`。先用同一段文案生成试听样本，用户选定后再进入 Demo。
+- CosyVoice 通过 `voice.engine: "cosyvoice"` 接入。`voice.command` 保留单句兼容与诊断能力，必须包含 `{text_file}`（UTF-8 文本临时文件）或 `{text}`，以及 `{output}`（目标 WAV）。长文应再配置 `voice.batch_command`，其中必须包含 `{jobs_file}`；流水线把所有缓存未命中的句子写入 UTF-8 JSON manifest，只启动一次批量命令，命令加载一次模型并为每个 job 的绝对 `output` 路径生成独立 PCM WAV。缓存命中的句子不会进入 manifest，批处理失败或缺少任一输出时不会登记成功缓存。配置还需有 `provider: "cosyvoice"`、`model`、`model_path`、`license` 和 `revision`。先用同一段文案完成 preflight 试听，再进入 Demo。
+- skill 自带 `scripts/cosyvoice_batch_infer.py`，用于采用官方 `AutoModel`/`inference_sft` 接口的本地 CosyVoice。示例：`["D:/envs/cosyvoice/python.exe", "D:/skills/narrated-video/scripts/cosyvoice_batch_infer.py", "--cosyvoice-root", "D:/tools/CosyVoice", "--model-path", "{model_path}", "--jobs-file", "{jobs_file}", "--speaker", "{speaker}", "--speed", "{speed}", "--ffmpeg", "{ffmpeg}"]`。若 CosyVoice 前端依赖已缓存的 ModelScope wetext，可额外传 `--wetext-model` 的现有本地目录。实际路径必须来自用户已选择的环境；适配器不安装依赖、不下载权重。`voice.command` 仍可使用原有单句脚本作为回退。
 - 本地 MeloTTS 的 speaker 名称须存在于模型，常用中文为 `ZH`。`revision` 用于本地模型/权重更新后的主动缓存失效，更新模型后递增它。MeloTTS 可能在模型未缓存时联网获取模型；无下载授权时先确认现有环境和模型缓存齐全。
 - MeloTTS 的 g2p_en 导入可能触发 NLTK 数据下载，脚本先检查 `cmudict.zip` 和 `averaged_perceptron_tagger.zip`。查找失败时显示搜索路径，先让用户选择 `runtime.nltk_data` 指向已有资源，不能据此判断机器没有安装；仅在确认需要新增资源后征得下载授权。不通过关闭网络安全检查解决。
 - 每句 WAV 在拼接前统一归一化到约 -20 LUFS、真峰值 -2 dB，并施加`dynaudnorm` 平滑并补偿句内电平；归一化不应改变自然停顿。以归一化后真实样本数测量时长，再向上对齐整数视频帧，只在句尾补不足一帧的静音，不裁掉讲话。时间轴和 SRT 使用这些帧边界。因此长片总时长可能比原 WAV 时长之和多出少量补齐时间。
@@ -106,7 +107,7 @@ preflight 未通过或因运行环境/配音配置变化而失效时，`check`�
 
 文案/分句改变会使 script、storyboard 和 Demo 批准失效；任何完整分镜变化会使 storyboard 批准失效，只有制作纲要、Demo 选段或 Demo 镜头内容变化才同时使 Demo 批准失效。style、voice、字幕、输出、音乐及 Demo 素材改变也使 Demo 批准失效。其他镜头换图不要求重新批准 storyboard 或 Demo。文件内容用 SHA-256 检查，路径相同但内容变了也会失效。
 
-缓存分为 TTS、图片运镜、镜头音视频、拼接、最终字幕混音。每步成功后写入校验记录；失败的 partial 文件不会被当作成功缓存。换图重做相关运镜和叠化的下一镜头，换字幕不重做图片，改配音仅重做受影响内容和下游。最终封装/校验仍需遍历整片，不代表完全免除全片处理。渲染器代码变化使缓存失效，模型更新用 voice.revision 失效。缓存不自动清理。
+缓存分为 TTS、图片运镜、镜头音视频、拼接、最终字幕混音。每步成功后写入校验记录；失败的 partial 文件不会被当作成功缓存。CosyVoice 批处理只提交 TTS 缓存未命中的句子，并在整批输出全部通过 PCM WAV 检查后逐句登记缓存。换图重做相关运镜和叠化的下一镜头，换字幕不重做图片，改配音仅重做受影响内容和下游。最终封装/校验仍需遍历整片，不代表完全免除全片处理。渲染器代码变化使缓存失效，模型更新用 voice.revision 失效。缓存不自动清理。
 
 `check` 仅检查结构、口播一致性与引用覆盖；`verify` 完整解码视频/音频、检查视频帧数和时间轴连续性、抽取首中尾三帧。报告里的视觉和试听项默认 pending，agent 实际看过/听过后可补充范围和结论；不能把结构验证当作内容、史实、声画同步或听感全面合格。
 

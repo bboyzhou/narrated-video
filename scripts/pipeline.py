@@ -386,6 +386,12 @@ class Project:
                     'CosyVoice requires voice.command: an argv list with {text_file} and {output} placeholders')
             require('{output}' in voice['command'] and ('{text_file}' in voice['command'] or '{text}' in voice['command']),
                     'CosyVoice command must include {output} and {text_file} or {text}')
+            batch_command = voice.get('batch_command')
+            if batch_command is not None:
+                require(isinstance(batch_command, list) and batch_command,
+                        'CosyVoice batch_command must be a nonempty argv list')
+                require(any('{jobs_file}' in str(item) for item in batch_command),
+                        'CosyVoice batch_command must include {jobs_file}')
             require(voice.get('model') and voice.get('model_path'), 'CosyVoice requires model and model_path')
             require(voice.get('license'), 'CosyVoice requires model license notes')
             require(self.path_for(voice['model_path']).exists(), 'CosyVoice model_path unavailable: ' + str(voice['model_path']))
@@ -508,18 +514,27 @@ class Project:
         require(self.ffmpeg, 'FFmpeg not found; pass --ffmpeg, configure/remember-runtime, or set FFMPEG. No automatic installation.')
         return run([self.ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-y', *args], cwd)
 
-    def cached(self, kind, inputs, suffix, producer):
+    def cache_slot(self, kind, inputs, suffix):
         key = digest({'kind': kind, 'inputs': inputs,
                       'runtime': {**self.c.get('runtime', {}), **self.runtime}, 'ffmpeg': self.ffmpeg,
                       'renderer': [file_hash(__file__), file_hash(Path(__file__).with_name('runtime.py')),
                                    file_hash(Path(__file__).with_name('composition.py'))]})
         target = self.cache / (key + suffix)
         stamp = self.cache / (key + '.json')
+        temporary = self.cache / (key + '.partial' + suffix)
+        return target, stamp, temporary
+
+    @staticmethod
+    def cache_valid(target, stamp):
+        return (target.is_file() and stamp.is_file() and
+                read_json(stamp).get('sha256') == file_hash(target))
+
+    def cached(self, kind, inputs, suffix, producer):
+        target, stamp, temporary = self.cache_slot(kind, inputs, suffix)
         self.cache.mkdir(parents=True, exist_ok=True)
-        if target.is_file() and stamp.is_file() and read_json(stamp).get('sha256') == file_hash(target):
+        if self.cache_valid(target, stamp):
             self.stats['reused'] += 1
             return target
-        temporary = self.cache / (key + '.partial' + suffix)
         producer(temporary)
         require(temporary.is_file() and temporary.stat().st_size > 0, 'Empty cache output')
         temporary.replace(target)
@@ -527,19 +542,85 @@ class Project:
         self.stats['rendered'] += 1
         return target
 
+    def cosyvoice_batch(self, selected_ids, config):
+        """Generate all uncached CosyVoice sentences with one model process."""
+        batch_command = config.get('batch_command')
+        if not batch_command:
+            return {}
+        self.cache.mkdir(parents=True, exist_ok=True)
+        result = {}
+        misses = []
+        for sid in selected_ids:
+            sentence = self.sentences[sid]
+            if sentence.get('audio'):
+                continue
+            inputs = {'text': tts_input(sentence), 'subtitle_text': sentence['text'],
+                      'pronunciation': sentence.get('pronunciation', []), 'voice': config}
+            target, stamp, temporary = self.cache_slot('tts', inputs, '.wav')
+            if self.cache_valid(target, stamp):
+                self.stats['reused'] += 1
+                result[sid] = target
+                continue
+            misses.append({'id': sid, 'text': tts_input(sentence), 'output': str(temporary),
+                           'target': target, 'stamp': stamp, 'temporary': temporary, 'inputs': inputs})
+        if not misses:
+            return result
+
+        jobs_key = digest([{'id': item['id'], 'text': item['text'],
+                            'output': str(item['temporary'])} for item in misses])[:20]
+        jobs_file = self.cache / ('.cosyvoice-' + jobs_key + '.partial.json')
+        effective_runtime = {**self.c.get('runtime', {}), **self.runtime}
+        write_json(jobs_file, {'version': 1, 'offline': bool(effective_runtime.get('offline', False)),
+                               'jobs': [{'id': item['id'], 'text': item['text'],
+                                         'output': str(item['temporary'])} for item in misses]})
+        argv = []
+        for arg in batch_command:
+            value = str(arg).replace('{jobs_file}', str(jobs_file))
+            value = value.replace('{model_path}', str(self.path_for(config['model_path'])))
+            value = value.replace('{speaker}', str(config.get('speaker', '中文男')))
+            value = value.replace('{speed}', str(config.get('speed', 1)))
+            if '{ffmpeg}' in value:
+                require(self.ffmpeg, 'CosyVoice batch_command uses {ffmpeg}, but FFmpeg is unavailable')
+                value = value.replace('{ffmpeg}', str(self.ffmpeg))
+            argv.append(value)
+        try:
+            run(argv, cwd=str(self.root))
+        finally:
+            jobs_file.unlink(missing_ok=True)
+
+        # Validate the complete batch before promoting any partial output.  A
+        # failed or incomplete batch therefore cannot become a cache hit.
+        for item in misses:
+            temporary = item['temporary']
+            require(temporary.is_file() and temporary.stat().st_size > 0,
+                    'CosyVoice batch command did not create a WAV for ' + item['id'])
+            with wave.open(str(temporary), 'rb') as audio:
+                require(audio.getnframes() > 0 and audio.getcomptype() == 'NONE',
+                        'CosyVoice batch command requires nonempty PCM WAV for ' + item['id'])
+        for item in misses:
+            item['temporary'].replace(item['target'])
+            write_json(item['stamp'], {'sha256': file_hash(item['target']), 'inputs': item['inputs']})
+            self.stats['rendered'] += 1
+            result[item['id']] = item['target']
+        return result
+
     def voices(self, stage):
         self.gate(stage)
         selected_ids = [sid for shot in self.selected(stage) for sid in shot['narration']]
         result = {}
         model = None
+        config = self.c['voice']
+        batch_raw = (self.cosyvoice_batch(selected_ids, config)
+                     if config['engine'] == 'cosyvoice' and config.get('batch_command') else {})
         for sid in selected_ids:
             sentence = self.sentences[sid]
             if sentence.get('audio'):
                 p = self.path_for(sentence['audio'])
                 require(p.is_file(), 'Missing audio: ' + str(p))
+            elif sid in batch_raw:
+                p = batch_raw[sid]
             else:
                 require(self.c['voice']['engine'] in ('melotts', 'cosyvoice'), 'Missing per-sentence WAV for ' + sid)
-                config = self.c['voice']
                 def synthesize(target):
                     nonlocal model
                     if config['engine'] == 'cosyvoice':

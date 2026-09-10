@@ -23,7 +23,7 @@ macOS/Linux 使用相同的命令，将解释器和工具路径换成 POSIX 路�
 
 CogVideoX 等生成式视频 provider 不属于本地运行环境门禁。可在项目中记录 `video_generation.provider: cogvideox_colab`、`execution: remote_manual` 和 `local_gpu_required: false`；`preflight` 不检查 CUDA、torch、diffusers、模型权重或 Colab 连通性。生成式视频任务包和结果导回分别使用 [生成式视频](generated-video.md) 中的工具。
 
-`preflight` 检查 FFmpeg 的版本、`perspective`/`xfade`/`subtitles`/响度与混音滤镜以及 `libx264`/AAC 编码器。MeloTTS 模式还检查模块、NLTK，并强制离线实际加载所选语言模型与 speaker，确保缓存完整；CosyVoice 模式使用临时短句验证命令、模型目录和 PCM WAV 输出；`files` 模式跳过 TTS 检查。临时样本会删除，不生成项目媒体。
+`preflight` 检查 FFmpeg 的版本、`perspective`/`xfade`/`subtitles`/响度与混音滤镜以及 `libx264`/AAC 编码器。MeloTTS 模式还检查模块、NLTK，并强制离线实际加载所选语言模型与 speaker，确保缓存完整；CosyVoice 模式使用临时短句验证命令、模型目录和 PCM WAV 输出，配置了 `batch_command` 时优先按一条 job 的 manifest 验证批量入口；`files` 模式跳过 TTS 检查。临时样本会删除，不生成项目媒体。
 
 后续 CLI 会自动按“命令行临时参数 > 项目 `runtime` > 全局运行环境 > 当前进程环境 > PATH/当前 Python”解析路径，并在导入 NLTK、Transformers、MeloTTS 或 CosyVoice 原生推理脚本**之前**注入项目资源路径。即使最初用另一套 Python 启动，也会转到配置的解释器执行。直接在其他程序中 `import Project` 不会自动重启解释器，需调用方使用已配置环境，推荐使用 CLI。
 
