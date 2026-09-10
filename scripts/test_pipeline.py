@@ -13,7 +13,8 @@ import tempfile
 import wave
 
 from pipeline import (Project, initialize, preflight_fingerprint, preflight_path,
-                      write_json, read_json, pause_seconds, trailing_silence_seconds)
+                      write_json, read_json, pause_seconds, trailing_silence_seconds,
+                      speech_rate_adjustment)
 
 
 def rejected(action, message):
@@ -51,6 +52,18 @@ def regression_pacing_checks(root):
         w.setparams(params)
         w.writeframes(frames + b'\x00\x00' * round(24000 * .1))
     assert .09 <= trailing_silence_seconds(tail) <= .11
+    rate_cfg = {'policy': 'soft', 'target_units_per_second': 5,
+                'tolerance': .12, 'min_tempo': .88, 'max_tempo': 1.12, 'min_units': 6}
+    fast = root / 'fast.wav'
+    tone(fast, 1.0, 440)
+    fast_info = speech_rate_adjustment({'text': '一二三四五六七八九十'}, fast, rate_cfg)
+    assert fast_info['rate_status'] == 'clamped' and abs(fast_info['tempo_factor'] - .88) < 1e-9
+    short = root / 'short.wav'
+    tone(short, 1.0, 440)
+    short_info = speech_rate_adjustment({'text': '一二三'}, short, rate_cfg)
+    assert short_info['rate_status'] == 'insufficient_data'
+    preserved = speech_rate_adjustment({'text': '一二三四五六七八九十', 'rate_policy': 'preserve'}, fast, rate_cfg)
+    assert preserved['rate_status'] == 'preserved' and preserved['tempo_factor'] == 1.0
 
 
 def storyboard_for(shots):

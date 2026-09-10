@@ -68,6 +68,86 @@ def trailing_silence_seconds(path, threshold_db=-45, window_ms=20):
     return min(total / rate, silent_frames / rate)
 
 
+def spoken_units(text):
+    """Count coarse spoken units for rate diagnostics (Chinese-first)."""
+    units = 0
+    latin_or_digits = re.compile(r"[A-Za-z]+(?:['-][A-Za-z]+)*|\d+(?:[.,]\d+)*")
+    i = 0
+    while i < len(text):
+        match = latin_or_digits.match(text, i)
+        if match:
+            units += 1
+            i = match.end()
+            continue
+        char = text[i]
+        if ('\u3400' <= char <= '\u4dbf' or '\u4e00' <= char <= '\u9fff' or
+                '\uf900' <= char <= '\ufaff'):
+            units += 1
+        elif unicodedata.category(char).startswith('L') and not char.isspace():
+            units += 1
+        i += 1
+    return units
+
+
+def active_speech_seconds(path, threshold_db=-45, window_ms=20):
+    """Estimate non-silent PCM duration without external VAD dependencies."""
+    with wave.open(str(path), 'rb') as audio:
+        require(audio.getcomptype() == 'NONE' and audio.getsampwidth() == 2,
+                'Speech-rate measurement requires 16-bit PCM WAV')
+        rate, channels, total = audio.getframerate(), audio.getnchannels(), audio.getnframes()
+        if not total:
+            return 0.0
+        samples = array('h', audio.readframes(total))
+    threshold = 32767 * (10 ** (threshold_db / 20))
+    frame = max(1, int(rate * window_ms / 1000))
+    active = 0
+    for start in range(0, total, frame):
+        block = samples[start * channels:min(total, start + frame) * channels]
+        if not block:
+            continue
+        rms = math.sqrt(sum(sample * sample for sample in block) / len(block))
+        if rms > threshold:
+            active += min(frame, total - start)
+    return active / rate
+
+
+def speech_rate_adjustment(sentence, path, config):
+    """Return bounded tempo correction and diagnostics for one normalized WAV."""
+    policy = config.get('policy', 'none') if isinstance(config, dict) else 'none'
+    sentence_policy = sentence.get('rate_policy', 'inherit')
+    if sentence_policy == 'preserve':
+        return {'spoken_units': spoken_units(sentence.get('text', '')), 'active_speech_duration': None,
+                'raw_rate': None, 'normalized_rate': None, 'tempo_factor': 1.0,
+                'rate_status': 'preserved'}
+    if sentence_policy == 'normalize' and policy in ('none', 'off'):
+        policy = 'soft'
+    units = spoken_units(sentence.get('text', ''))
+    active = active_speech_seconds(path) if units else 0.0
+    result = {'spoken_units': units, 'active_speech_duration': active,
+              'raw_rate': None, 'normalized_rate': None, 'tempo_factor': 1.0,
+              'rate_status': 'disabled' if policy in ('none', 'off') else 'insufficient_data'}
+    if policy in ('none', 'off'):
+        return result
+    require(policy == 'soft', 'Unsupported pacing.rate.policy: ' + str(policy))
+    target = float(config.get('target_units_per_second', 4.5))
+    tolerance = float(config.get('tolerance', 0.12))
+    minimum = int(config.get('min_units', 6))
+    low_tempo, high_tempo = float(config.get('min_tempo', 0.88)), float(config.get('max_tempo', 1.12))
+    if units < minimum or active < 0.25:
+        return result
+    raw = units / active
+    low, high = target * (1 - tolerance), target * (1 + tolerance)
+    if low <= raw <= high:
+        result.update(raw_rate=raw, normalized_rate=raw, rate_status='within_tolerance')
+        return result
+    desired = low if raw < low else high
+    factor = max(low_tempo, min(high_tempo, desired / raw))
+    normalized = raw * factor
+    result.update(raw_rate=raw, normalized_rate=normalized, tempo_factor=factor,
+                  rate_status='adjusted' if abs(factor - desired / raw) < 1e-8 else 'clamped')
+    return result
+
+
 def pause_seconds(sentence, pacing, is_final=False, shot_boundary=False):
     """Return the requested post-sentence pause, independent of TTS engine."""
     if not pacing or pacing.get('pause_policy', 'semantic') in ('none', 'off'):
@@ -431,6 +511,27 @@ class Project:
             if 'pause_role' in sentence:
                 require(sentence['pause_role'] in PAUSE_ROLES,
                         sentence['id'] + ': unsupported pause_role')
+            if 'rate_policy' in sentence:
+                require(sentence['rate_policy'] in ('inherit', 'normalize', 'preserve'),
+                        sentence['id'] + ': rate_policy must be inherit, normalize or preserve')
+        rate = pacing.get('rate', {})
+        require(isinstance(rate, dict), 'pacing.rate must be an object')
+        require(rate.get('policy', 'none') in ('soft', 'none', 'off'),
+                'pacing.rate.policy must be soft, none or off')
+        if 'target_units_per_second' in rate:
+            require(0.5 <= float(rate['target_units_per_second']) <= 20,
+                    'pacing.rate.target_units_per_second must be 0.5..20')
+        if 'tolerance' in rate:
+            require(0 <= float(rate['tolerance']) <= 0.5, 'pacing.rate.tolerance must be 0..0.5')
+        for key in ('min_tempo', 'max_tempo'):
+            if key in rate:
+                require(0.5 <= float(rate[key]) <= 2, 'pacing.rate.' + key + ' must be 0.5..2')
+        if 'min_tempo' in rate and 'max_tempo' in rate:
+            require(float(rate['min_tempo']) <= float(rate['max_tempo']),
+                    'pacing.rate.min_tempo must not exceed max_tempo')
+        if 'min_units' in rate:
+            require(type(rate['min_units']) is int and rate['min_units'] >= 1,
+                    'pacing.rate.min_units must be a positive integer')
         text = self.path_for(c['script']).read_text(encoding='utf-8-sig')
         require(compact(text) == compact(''.join(s['text'] for s in c['narration'])), 'Narration must match the approved plain spoken script exactly (except whitespace)')
         sub = c['subtitles']
@@ -554,7 +655,11 @@ class Project:
                 sentence = self.sentences[sid]
                 if sentence.get('audio'):
                     voices.append(self.asset(sentence['audio']))
+        delivery = {s['id']: {k: s[k] for k in ('tts_text', 'pronunciation', 'pronunciation_note',
+                                                 'pause_after', 'pause_role', 'rate_policy') if k in s}
+                    for s in self.c['narration'] if s['id'] in {sid for shot in shots for sid in shot['narration']}}
         return digest({'script': self.script_key(), 'style': self.c['style'], 'voice': self.c['voice'],
+                       'pacing': self.c.get('pacing', {}), 'delivery': delivery,
                        'storyboard': self.demo_storyboard_key(),
                        'output': self.output, 'subtitles': self.c['subtitles'], 'shots': shots, 'demo': self.c['demo'],
                        'motion': self.c.get('motion', {}),
@@ -698,7 +803,10 @@ class Project:
         model = None
         config = self.c['voice']
         pacing = self.c.get('pacing', {})
-        pacing_enabled = bool(pacing) and pacing.get('pause_policy', 'semantic') not in ('none', 'off')
+        pause_keys = {'pause_policy', 'default_pause', 'continuation_pause', 'dialogue_pause',
+                      'scene_change_pause', 'dramatic_pause', 'final_pause'}
+        pacing_enabled = bool(pacing) and bool(pause_keys.intersection(pacing)) and \
+            pacing.get('pause_policy', 'semantic') not in ('none', 'off')
         shot_last = {sid for shot in self.selected(stage) for sid in shot['narration'][-1:]}
         final_sid = selected_ids[-1] if selected_ids else None
         batch_raw = (self.cosyvoice_batch(selected_ids, config)
@@ -760,6 +868,16 @@ class Project:
                             lambda target, source=source: self.ff(
                                 ['-i', source, '-af', 'loudnorm=I=-20:TP=-2:LRA=7:linear=false,dynaudnorm=f=20:g=3:p=0.98:m=30',
                                  '-ar', '48000', '-ac', '1', '-c:a', 'pcm_s16le', target]))
+            rate_cfg = pacing.get('rate', {})
+            rate_info = speech_rate_adjustment(sentence, p, rate_cfg)
+            rate_factor = rate_info['tempo_factor']
+            if abs(rate_factor - 1.0) > 1e-6:
+                rate_inputs = {'source': self.asset(p), 'rate': rate_cfg,
+                               'metrics': {k: rate_info[k] for k in ('spoken_units', 'active_speech_duration', 'raw_rate')}}
+                p = self.cached('voice-rate', rate_inputs, '.wav',
+                                lambda target, source=p, factor=rate_factor: self.ff(
+                                    ['-i', source, '-af', f'atempo={factor:.8f}',
+                                     '-ar', '48000', '-ac', '1', '-c:a', 'pcm_s16le', target]))
             with wave.open(str(p), 'rb') as w:
                 speech_frames = w.getnframes()
                 speech_rate = w.getframerate()
@@ -788,6 +906,7 @@ class Project:
                            'speech_duration': speech_duration,
                            'speech_frames': speech_video_frames,
                            'pause_seconds': max(0.0, total_duration - speech_duration),
+                           'rate': rate_info,
                            'sha256': file_hash(output)}
         return result
 
@@ -877,7 +996,8 @@ class Project:
                                  'subtitle_end_frame': cursor + info.get('speech_frames', info['frames']),
                                  'audio_duration': info['duration'],
                                  'speech_duration': info.get('speech_duration', info['duration']),
-                                 'pause_seconds': info.get('pause_seconds', 0.0)})
+                                 'pause_seconds': info.get('pause_seconds', 0.0),
+                                 'rate': info.get('rate', {})})
                 cursor += info['frames']
         # Cache paths contain only hashes, avoiding concat-demuxer path escaping.
         listing = self.cache / 'assembly.txt'
@@ -1008,9 +1128,14 @@ class Project:
             music_checks.append({'path': str(mp), 'configured_volume': m.get('volume', .22),
                                  'source_mean_db': mean_db,
                                  'audibility_warning': m.get('volume', .22) < .15})
+        rate_rows = [row.get('rate', {}) for row in rows if row.get('rate', {}).get('raw_rate') is not None]
         report = {'decode_passed': True, 'decoded_frames': frames[-1], 'duration_seconds': frames[-1]/self.fps,
                   'timeline_contiguous': True, 'sample_frames': samples, 'visual_review': 'pending agent/user review',
-                  'listening_review': 'pending agent/user review', 'music_checks': music_checks, 'cache': self.stats}
+                  'listening_review': 'pending agent/user review', 'music_checks': music_checks, 'cache': self.stats,
+                  'speech_rate': {'sentences_measured': len(rate_rows),
+                                  'adjusted': sum(r.get('rate_status') in ('adjusted', 'clamped') for r in rate_rows),
+                                  'raw_rates': [round(r['raw_rate'], 3) for r in rate_rows],
+                                  'normalized_rates': [round(r['normalized_rate'], 3) for r in rate_rows]}}
         write_json(destination / (stage + '-verification.json'), report)
         return report
 
@@ -1043,8 +1168,12 @@ def initialize(path, source):
                       'runtime': {'offline': True},
                       'style': {'name': 'custom', 'visual': '', 'tone': ''},
                       'output': {'width': 1280, 'height': 720, 'fps': 30},
-                      'voice': {'engine': 'melotts', 'language': 'ZH', 'speaker': 'ZH', 'device': 'cpu', 'speed': 1, 'revision': '1'},
-                      'subtitles': {'enabled': True, 'font': 'Microsoft YaHei', 'size': 48, 'min_size': 28, 'max_width_ratio': 0.88, 'margin': 30, 'max_chars': 24},
+                       'voice': {'engine': 'melotts', 'language': 'ZH', 'speaker': 'ZH', 'device': 'cpu', 'speed': 1, 'revision': '1'},
+                       'pacing': {'pause_policy': 'none',
+                                  'rate': {'policy': 'soft', 'target_units_per_second': 4.5,
+                                           'tolerance': 0.12, 'min_tempo': 0.88,
+                                           'max_tempo': 1.12, 'min_units': 6}},
+                       'subtitles': {'enabled': True, 'font': 'Microsoft YaHei', 'size': 48, 'min_size': 28, 'max_width_ratio': 0.88, 'margin': 30, 'max_chars': 24},
                       'motion': {'easing': 'smoothstep', 'max_zoom': 0.06},
                       'narration': [], 'shots': [], 'demo': {'shots': []}, 'music': []})
     print('Created ' + str(path) + '; run preflight before drafting the spoken script or production plan.')
