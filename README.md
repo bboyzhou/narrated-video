@@ -4,6 +4,8 @@
 
 支持 `image/video` 镜头及图片/视频图层的位置、缩放、旋转、透明度关键帧；可查询并引用离线素材库，详见 [动态素材合成](references/composition.md)。工作流会依次确认口播稿、制作纲要与完整分镜、Demo，再渲染全片；配音时间轴按实际 WAV 时长对齐，缓存支持局部重跑。网络素材由 agent 核对来源与许可后落地，渲染器不联网。
 
+生成式视频是可选的外部素材阶段：用 [生成式视频](references/generated-video.md) 和 `scripts/prepare_video_jobs.py` 准备任务包，在 Colab/CogVideoX 中生成后，用 `scripts/import_generated_videos.py` 导回为普通 `type: video` 镜头。失败时可回退到图片运镜；本地不需要 CUDA 或 CogVideoX。
+
 ## 使用
 
 将本目录作为 skill 使用，入口说明见 [SKILL.md](SKILL.md)。脚本命令和项目 JSON 见 [references/project.md](references/project.md)，分镜规范见 [references/storyboard.md](references/storyboard.md)；首次使用先阅读 [references/runtime.md](references/runtime.md) 选择 Python、FFmpeg、NLTK 和模型缓存路径。

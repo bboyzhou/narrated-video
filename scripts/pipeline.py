@@ -290,8 +290,24 @@ class Project:
             self._text_list(plan.get('continuity'), shot_id + '.continuity')
             self._text(plan.get('prompt'), shot_id + '.prompt')
             self._text(plan.get('negative_prompt'), shot_id + '.negative_prompt')
-            require(plan.get('asset_strategy') in ('user', 'generate', 'licensed', 'mixed'),
-                    shot_id + '.asset_strategy must be user, generate, licensed or mixed')
+            require(plan.get('asset_strategy') in ('user', 'generate', 'licensed', 'mixed', 'generated_video'),
+                    shot_id + '.asset_strategy must be user, generate, licensed, mixed or generated_video')
+            if plan.get('asset_strategy') == 'generated_video':
+                self._text(plan.get('source_image'), shot_id + '.source_image')
+                source_image = self.path_for(plan['source_image'])
+                require(source_image.is_file(), shot_id + '.source_image missing: ' + str(source_image))
+                self._text(plan.get('motion_prompt'), shot_id + '.motion_prompt')
+                self._text_list(plan.get('motion_constraints'), shot_id + '.motion_constraints')
+                generation = plan.get('generation')
+                require(isinstance(generation, dict), shot_id + '.generation must be an object')
+                require(generation.get('provider') == 'cogvideox_colab',
+                        shot_id + '.generation.provider must be cogvideox_colab')
+                require(generation.get('mode') == 'i2v', shot_id + '.generation.mode must be i2v')
+                require(type(generation.get('duration_target')) in (int, float) and
+                        1 <= generation['duration_target'] <= 30,
+                        shot_id + '.generation.duration_target must be 1..30 seconds')
+                require(type(generation.get('seed')) is int and 0 <= generation['seed'] <= 2**32 - 1,
+                        shot_id + '.generation.seed must be an integer in 0..2^32-1')
             require(plan.get('motion') == shot.get('motion', 'push'),
                     shot_id + ': storyboard motion must match project shot motion')
             require(type(plan.get('transition_seconds')) in (int, float) and

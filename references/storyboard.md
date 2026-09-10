@@ -38,9 +38,28 @@ python $pipeline record $project --stage storyboard --quote '用户实际批准�
 - `narration` 与 `estimated_duration_seconds`：对应口播及预计停留时长；
 - `visual`：主体、动作、环境、景别、构图、光线与色彩；
 - `continuity`：从全局锚点中继承或延续的具体要素；
-- `asset_strategy`：`user`、`generate`、`licensed` 或 `mixed`；
+- `asset_strategy`：`user`、`generate`、`licensed`、`mixed` 或 `generated_video`；
 - `prompt` 与 `negative_prompt`：实际用于图像检索或生成的正负约束；
 - `motion` 与 `transition_seconds`：必须与项目渲染配置一致。
+
+使用 `generated_video` 时，仍先准备并批准静态分镜图，再增加视频动作字段：
+
+```json
+{
+  "asset_strategy": "generated_video",
+  "source_image": "images/S003.png",
+  "motion_prompt": "The general remains standing while his robe and banners move gently in the wind. Slow cinematic push-in.",
+  "motion_constraints": ["preserve character identity", "preserve costume", "preserve composition"],
+  "generation": {
+    "provider": "cogvideox_colab",
+    "mode": "i2v",
+    "duration_target": 6,
+    "seed": 42
+  }
+}
+```
+
+`prompt` 描述静态画面的主体、时代、场景与构图；`motion_prompt` 只描述谁动、如何动、镜头如何动；`motion_constraints` 写必须保留的身份、服装、构图和事实限制。生成式视频只是素材策略，不创建新的 `type`；生成 MP4 导入后项目镜头仍为 `type: video`。
 
 提示词应写可见内容和构图，避免只写“震撼”“高级”“电影感”等不可执行形容词。角色或地点重复出现时，使用一致的名称和连续性描述；镜头需要变化时写清变化点，不靠生成工具自行推断。
 

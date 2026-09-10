@@ -29,6 +29,9 @@ python $pipeline record $project --stage script --quote '用户实际批准回�
 python $pipeline check $project
 # agent 展示制作纲要、完整逐镜表、Demo 选择理由与验证目标；此处等待真实回复。
 python $pipeline record $project --stage storyboard --quote '用户实际批准回复'
+# 若 Demo 分镜声明 generated_video：先准备任务包，外部生成并导回，再渲染 Demo。
+python D:/workspace/narrated-video/scripts/prepare_video_jobs.py D:/videos/example/storyboard.json --project $project --stage demo --output D:/videos/example/video_jobs.json
+python D:/workspace/narrated-video/scripts/import_generated_videos.py $project D:/videos/example/cogvideo-output.zip --jobs D:/videos/example/video_jobs.json
 python $pipeline tts $project --stage demo
 python $pipeline render $project --stage demo --ffmpeg $ffmpeg
 # agent 抽帧查看、试听，并将 Demo 交给用户；此处等待真实回复。
@@ -60,6 +63,7 @@ preflight 未通过或因运行环境/配音配置变化而失效时，`check`�
   "voice": {"engine": "melotts", "language": "ZH", "speaker": "ZH", "device": "cpu", "speed": 0.95, "revision": "1"},
   "subtitles": {"enabled": true, "font": "Microsoft YaHei", "size": 48, "min_size": 28, "max_width_ratio": 0.88, "margin": 30, "max_chars": 24},
   "motion": {"easing": "smoothstep", "max_zoom": 0.06},
+  "video_generation": {"provider": "cogvideox_colab", "execution": "remote_manual", "local_gpu_required": false},
   "narration": [
     {"id": "N001", "text": "故事从这里开始。"},
     {"id": "N002", "text": "接下来，我们走近这段历史。"}
