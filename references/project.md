@@ -1,5 +1,7 @@
 # 项目配置及命令
 
+动态视频镜头、图片/视频图层、关键帧与离线素材库见 [动态素材合成](composition.md)。
+
 脚本位置：本 skill 的 `scripts/pipeline.py`。使用现有 Python 3.10+，仅标准库；渲染需要带 libx264、libass、xfade、loudnorm 的 FFmpeg。配音生成需要已有 MeloTTS 或 CosyVoice 原生推理环境；也可直接使用逐句 WAV。首次使用先由用户选择软件和资源路径，不自动安装包。
 
 软件和资源路径的首次选择、字段优先级及诊断见 [运行环境](runtime.md)。同一项目路径已选定且有效时直接复用；跨项目或跨 Agent 会话可在 `preflight` 成功后用 `remember-runtime` 保存已验证路径。

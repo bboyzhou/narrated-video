@@ -18,6 +18,7 @@ import unicodedata
 import wave
 from runtime import (resolve_paths, validate_paths, relaunch, path_report, doctor,
                      update_config, write_global_runtime)
+from composition import resolve_asset, validate_layers, render_args
 
 VERSION = 1
 
@@ -235,8 +236,7 @@ class Project:
                 'Preflight missing or stale; run preflight before script or storyboard planning')
 
     def path_for(self, value):
-        p = Path(value)
-        return p.resolve() if p.is_absolute() else (self.root / p).resolve()
+        return resolve_asset(self.root, self.c, value)[0]
 
     @staticmethod
     def _text(value, label):
@@ -301,6 +301,9 @@ class Project:
                     shot_id + ': project prompt must match the approved storyboard prompt')
             require(shot.get('negative_prompt') == plan['negative_prompt'],
                     shot_id + ': project negative_prompt must match the approved storyboard')
+            for key, default in (('layers', []), ('type', 'image'), ('source_start', 0), ('loop', False)):
+                require(plan.get(key, default) == shot.get(key, default),
+                        shot_id + ': storyboard ' + key + ' must match project shot')
 
         demo = self.storyboard.get('demo')
         require(isinstance(demo, dict), 'storyboard.demo must be an object')
@@ -343,7 +346,12 @@ class Project:
             require(re.fullmatch(r'[A-Za-z0-9_-]+', item['id']), 'IDs must use ASCII letters, digits, _ or -')
         covered = []
         for shot in c['shots']:
-            require(shot['type'] == 'image', 'Only image assets are implemented; video requires an adapter')
+            validate_layers(shot)
+            if shot['type'] == 'video':
+                require(shot.get('motion', 'push') == 'still', 'Video shots require motion=still')
+            for media in [shot, *shot.get('layers', [])]:
+                _, entry = resolve_asset(self.root, c, media['asset'])
+                require(not entry or entry['type'] == media['type'], 'Catalog media type mismatch')
             require(shot['narration'], 'Each shot needs narration IDs')
             covered.extend(shot['narration'])
             require(shot.get('motion', 'push') in ('still', 'push', 'pull', 'pan-left', 'pan-right'), 'Unsupported motion')
@@ -387,7 +395,7 @@ class Project:
     def storyboard_execution(self, shot_ids=None):
         ids = set(shot_ids) if shot_ids is not None else None
         return [{key: shot.get(key) for key in ('id', 'type', 'narration', 'motion', 'transition',
-                                                 'prompt', 'negative_prompt')}
+                                                 'prompt', 'negative_prompt', 'layers', 'source_start', 'loop')}
                 for shot in self.c['shots'] if ids is None or shot['id'] in ids]
 
     def storyboard_key(self):
@@ -422,8 +430,12 @@ class Project:
                 'warnings': warnings}
 
     def asset(self, value):
-        p = self.path_for(value)
-        return {'path': str(p), 'sha256': file_hash(p) if p.is_file() else None}
+        p, metadata = resolve_asset(self.root, self.c, value)
+        return {**metadata, 'path': str(p), 'sha256': file_hash(p) if p.is_file() else None}
+
+    def layer_assets(self, shots):
+        return [{**layer, **self.asset(layer['asset']), 'shot': shot['id']}
+                for shot in shots for layer in shot.get('layers', [])]
 
     def demo_key(self):
         shots = self.selected('demo')
@@ -438,10 +450,12 @@ class Project:
                        'output': self.output, 'subtitles': self.c['subtitles'], 'shots': shots, 'demo': self.c['demo'],
                        'motion': self.c.get('motion', {}),
                        'images': [self.asset(s['asset']) for s in shots], 'voices': voices,
+                       'layers': self.layer_assets(shots),
                        'music': [(m, self.asset(m['path'])) for m in self.c.get('music', [])],
                        'mix': self.c.get('mix', {}),
                        'runtime': {**self.c.get('runtime', {}), **self.runtime},
-                       'renderer': [file_hash(__file__), file_hash(Path(__file__).with_name('runtime.py'))]})
+                       'renderer': [file_hash(__file__), file_hash(Path(__file__).with_name('runtime.py')),
+                                    file_hash(Path(__file__).with_name('composition.py'))]})
 
     def gate(self, stage):
         self.require_preflight()
@@ -481,7 +495,8 @@ class Project:
     def cached(self, kind, inputs, suffix, producer):
         key = digest({'kind': kind, 'inputs': inputs,
                       'runtime': {**self.c.get('runtime', {}), **self.runtime}, 'ffmpeg': self.ffmpeg,
-                      'renderer': [file_hash(__file__), file_hash(Path(__file__).with_name('runtime.py'))]})
+                      'renderer': [file_hash(__file__), file_hash(Path(__file__).with_name('runtime.py')),
+                                   file_hash(Path(__file__).with_name('composition.py'))]})
         target = self.cache / (key + suffix)
         stamp = self.cache / (key + '.json')
         self.cache.mkdir(parents=True, exist_ok=True)
@@ -568,9 +583,28 @@ class Project:
         self.gate(stage)
         selected = self.selected(stage)
         for shot in selected:
-            require(self.path_for(shot['asset']).is_file(), 'Missing image: ' + shot['asset'])
+            for media in [shot, *shot.get('layers', [])]:
+                require(self.path_for(media['asset']).is_file(), 'Missing media: ' + media['asset'])
         for m in self.c.get('music', []):
             require(self.path_for(m['path']).is_file(), 'Missing music: ' + m['path'])
+        if any(s['type'] == 'video' or s.get('layers') for s in selected):
+            available = self.ff(['-filters']).stdout
+            for name in ('overlay', 'scale', 'pad', 'rotate', 'geq', 'tpad', 'fps'):
+                require(re.search(r'\b' + name + r'\b', available), 'FFmpeg lacks composition filter: ' + name)
+            checked = set()
+            for shot in selected:
+                for media in [shot, *shot.get('layers', [])]:
+                    if media['type'] != 'video':
+                        continue
+                    source = self.path_for(media['asset'])
+                    offset = media.get('source_start', 0)
+                    if (source, offset) in checked:
+                        continue
+                    probe = self.ff(['-ss', offset, '-i', source, '-map', '0:v:0', '-frames:v', 1,
+                                     '-progress', 'pipe:1', '-f', 'null', '-'])
+                    require(any(int(n) > 0 for n in re.findall(r'^frame=(\d+)', probe.stdout, re.MULTILINE)),
+                            'No decodable video frame at source_start: ' + str(source))
+                    checked.add((source, offset))
         voices = self.voices(stage)
         w, h, fps = self.output['width'], self.output['height'], self.fps
         durations = [sum(voices[s]['frames'] for s in shot['narration']) for shot in selected]
@@ -579,6 +613,7 @@ class Project:
             require(t < min(durations[i], durations[i + 1]), 'Transition must be shorter than both neighboring shots')
         raw = []
         for i, shot in enumerate(selected):
+            validate_layers(shot, durations[i] / fps)
             image = self.path_for(shot['asset'])
             n = durations[i] + tails[i]
             motion_cfg = self.c.get('motion', {})
@@ -586,8 +621,14 @@ class Project:
             vf = motion_filter(w, h, n, motion,
                                motion_cfg.get('easing', 'smoothstep'),
                                float(motion_cfg.get('max_zoom', 0.06)))
-            raw.append(self.cached('image-motion', [file_hash(image), vf], '.mp4',
-                                   lambda p, image=image, vf=vf, n=n: self.ff(['-loop', '1', '-framerate', str(fps), '-i', image, '-vf', vf, '-frames:v', n, '-an', '-c:v', 'libx264', '-preset', 'fast', '-crf', '19', '-pix_fmt', 'yuv420p', p])))
+            if shot['type'] == 'video' or shot.get('layers'):
+                args = render_args(shot, self.path_for, w, h, fps, n, vf)
+                raw.append(self.cached('composition', [self.asset(shot['asset']), shot,
+                                       self.layer_assets([shot]), w, h, fps, n, vf], '.mp4',
+                                       lambda p, args=args: self.ff([*args, p])))
+            else:
+                raw.append(self.cached('image-motion', [file_hash(image), vf, fps, n], '.mp4',
+                                       lambda p, image=image, vf=vf, n=n: self.ff(['-loop', '1', '-framerate', str(fps), '-i', image, '-vf', vf, '-frames:v', n, '-an', '-c:v', 'libx264', '-preset', 'fast', '-crf', '19', '-pix_fmt', 'yuv420p', p])))
         clips = []
         timeline = []
         cursor = 0
@@ -675,6 +716,7 @@ class Project:
         shutil.copyfile(final, artifact)
         write_json(destination / (stage + '-timeline.json'), {'fps': fps, 'total_frames': cursor, 'sentences': timeline})
         write_json(destination / (stage + '-manifest.json'), {'images': [{**s, **self.asset(s['asset'])} for s in selected],
+                                                             'layers': self.layer_assets(selected),
                                                              'audio': {sid: {**v, 'path': str(v['path'])} for sid, v in voices.items()},
                                                              'music': [{**m, **self.asset(m['path'])} for m in self.c['music']]})
         shutil.copyfile(self.path, destination / 'project.json')
