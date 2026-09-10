@@ -13,7 +13,7 @@ import tempfile
 import wave
 
 from pipeline import (Project, initialize, preflight_fingerprint, preflight_path,
-                      write_json, read_json)
+                      write_json, read_json, pause_seconds, trailing_silence_seconds)
 
 
 def rejected(action, message):
@@ -30,6 +30,27 @@ def tone(path, duration, frequency):
     with wave.open(str(path), 'wb') as w:
         w.setparams((1, 2, rate, 0, 'NONE', 'not compressed'))
         w.writeframes(b''.join(struct.pack('<h', int(2400 * math.sin(2*math.pi*frequency*i/rate))) for i in range(round(rate*duration))))
+
+
+def regression_pacing_checks(root):
+    pacing = {'pause_policy': 'semantic', 'default_pause': 0.28,
+              'continuation_pause': 0.18, 'dialogue_pause': 0.4,
+              'scene_change_pause': 0.5, 'final_pause': 1.5}
+    assert abs(pause_seconds({'text': '普通句。'}, pacing) - .28) < 1e-9
+    assert abs(pause_seconds({'text': '未完：'}, pacing) - .18) < 1e-9
+    assert abs(pause_seconds({'text': '他说！'}, pacing) - .4) < 1e-9
+    assert abs(pause_seconds({'text': '切镜。'}, pacing, shot_boundary=True) - .5) < 1e-9
+    assert abs(pause_seconds({'text': '收尾。'}, pacing, is_final=True) - 1.5) < 1e-9
+    assert abs(pause_seconds({'text': '覆盖。', 'pause_after': .7}, pacing) - .65) < 1e-9
+    assert pause_seconds({'text': '关闭。'}, {'pause_policy': 'none'}) == 0
+    tail = root / 'tail.wav'
+    tone(tail, .2, 440)
+    with wave.open(str(tail), 'rb') as source:
+        params, frames = source.getparams(), source.readframes(source.getnframes())
+    with wave.open(str(tail), 'wb') as w:
+        w.setparams(params)
+        w.writeframes(frames + b'\x00\x00' * round(24000 * .1))
+    assert .09 <= trailing_silence_seconds(tail) <= .11
 
 
 def storyboard_for(shots):
@@ -63,6 +84,7 @@ def main():
     parent = Path(args.output).resolve()
     parent.mkdir(parents=True, exist_ok=True)
     root = Path(tempfile.mkdtemp(prefix='validation-', dir=parent))
+    regression_pacing_checks(root)
     project_file = root / 'project.json'
     initialize(project_file, None)
     rejected(lambda: initialize(project_file, None), 'already exists')

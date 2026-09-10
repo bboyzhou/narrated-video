@@ -4,6 +4,7 @@
 Run --help and read ../references/project.md. No dependency installation.
 """
 import argparse
+from array import array
 import hashlib
 import json
 import math
@@ -33,6 +34,58 @@ POLYPHONE_HINTS = {
     '破敌': '破(pò)敌', '敌军': '敌(dí)军',
     '降服': '降(xiáng)服', '投降': '投降(xiáng)'
 }
+
+PAUSE_ROLES = {'default', 'continuation', 'dialogue', 'scene_change', 'dramatic', 'final'}
+
+
+def trailing_silence_seconds(path, threshold_db=-45, window_ms=20):
+    """Measure trailing near-silence in a PCM WAV without changing its audio."""
+    with wave.open(str(path), 'rb') as audio:
+        require(audio.getcomptype() == 'NONE' and audio.getsampwidth() == 2,
+                'Trailing-silence measurement requires 16-bit PCM WAV')
+        rate, channels, total = audio.getframerate(), audio.getnchannels(), audio.getnframes()
+        if not total:
+            return 0.0
+        samples = array('h', audio.readframes(total))
+    threshold = 32767 * (10 ** (threshold_db / 20))
+    window = max(1, int(rate * window_ms / 1000)) * channels
+    silent_frames = 0
+    for end in range(len(samples), 0, -window):
+        block = samples[max(0, end - window):end]
+        if not block:
+            break
+        rms = math.sqrt(sum(sample * sample for sample in block) / len(block))
+        if rms > threshold:
+            break
+        silent_frames += len(block) // channels
+    return min(total / rate, silent_frames / rate)
+
+
+def pause_seconds(sentence, pacing, is_final=False, shot_boundary=False):
+    """Return the requested post-sentence pause, independent of TTS engine."""
+    if not pacing or pacing.get('pause_policy', 'semantic') in ('none', 'off'):
+        return 0.0
+    explicit = sentence.get('pause_after')
+    if explicit is not None:
+        value = float(explicit)
+    else:
+        role = sentence.get('pause_role')
+        text = sentence.get('text', '').rstrip()
+        if is_final:
+            role = 'final'
+        elif shot_boundary and role is None:
+            role = 'scene_change'
+        elif role is None and text.endswith(('：', ':', '；', ';')):
+            role = 'continuation'
+        elif role is None and text.endswith(('！', '？', '!', '?', '”', '"')):
+            role = 'dialogue'
+        else:
+            role = role or 'default'
+        require(role in PAUSE_ROLES, 'Unsupported pause_role: ' + str(role))
+        value = float(pacing.get(role + '_pause', pacing.get('default_pause', 0.28)))
+    if not is_final:
+        value = min(max(value, 0.15), 0.65)
+    return max(0.0, value)
 
 
 def require(condition, message):
@@ -344,6 +397,25 @@ class Project:
             require(re.fullmatch(r'[A-Za-z0-9_-]+', item['id']), 'IDs must use ASCII letters, digits, _ or -')
         for sentence in c['narration']:
             require(isinstance(sentence['text'], str) and compact(sentence['text']), 'Empty narration text')
+        pacing = c.get('pacing', {})
+        require(isinstance(pacing, dict), 'pacing must be an object')
+        require(pacing.get('pause_policy', 'semantic') in ('semantic', 'none', 'off'),
+                'pacing.pause_policy must be semantic, none or off')
+        for key in ('default_pause', 'continuation_pause', 'dialogue_pause', 'scene_change_pause', 'dramatic_pause', 'final_pause'):
+            if key in pacing:
+                require(type(pacing[key]) in (int, float) and 0 <= pacing[key] <= 10,
+                        'pacing.' + key + ' must be 0..10 seconds')
+        if 'respect_existing_tail' in pacing:
+            require(type(pacing['respect_existing_tail']) is bool, 'pacing.respect_existing_tail must be boolean')
+        if 'subtitle_during_pause' in pacing:
+            require(type(pacing['subtitle_during_pause']) is bool, 'pacing.subtitle_during_pause must be boolean')
+        for sentence in c['narration']:
+            if 'pause_after' in sentence:
+                require(type(sentence['pause_after']) in (int, float) and 0 <= sentence['pause_after'] <= 10,
+                        sentence['id'] + ': pause_after must be 0..10 seconds')
+            if 'pause_role' in sentence:
+                require(sentence['pause_role'] in PAUSE_ROLES,
+                        sentence['id'] + ': unsupported pause_role')
         text = self.path_for(c['script']).read_text(encoding='utf-8-sig')
         require(compact(text) == compact(''.join(s['text'] for s in c['narration'])), 'Narration must match the approved plain spoken script exactly (except whitespace)')
         sub = c['subtitles']
@@ -610,6 +682,10 @@ class Project:
         result = {}
         model = None
         config = self.c['voice']
+        pacing = self.c.get('pacing', {})
+        pacing_enabled = bool(pacing) and pacing.get('pause_policy', 'semantic') not in ('none', 'off')
+        shot_last = {sid for shot in self.selected(stage) for sid in shot['narration'][-1:]}
+        final_sid = selected_ids[-1] if selected_ids else None
         batch_raw = (self.cosyvoice_batch(selected_ids, config)
                      if config['engine'] == 'cosyvoice' and config.get('batch_command') else {})
         for sid in selected_ids:
@@ -670,10 +746,34 @@ class Project:
                                 ['-i', source, '-af', 'loudnorm=I=-20:TP=-2:LRA=7:linear=false,dynaudnorm=f=20:g=3:p=0.98:m=30',
                                  '-ar', '48000', '-ac', '1', '-c:a', 'pcm_s16le', target]))
             with wave.open(str(p), 'rb') as w:
-                duration = w.getnframes() / w.getframerate()
+                speech_frames = w.getnframes()
+                speech_rate = w.getframerate()
+                duration = speech_frames / speech_rate
                 require(duration > 0 and w.getcomptype() == 'NONE', 'Use nonempty PCM WAV files')
-            frames = math.ceil(duration * self.fps - 1e-8)
-            result[sid] = {'path': p, 'duration': duration, 'frames': frames, 'sha256': file_hash(p)}
+            target_pause = pause_seconds(sentence, pacing, sid == final_sid, sid in shot_last) if pacing_enabled else 0.0
+            existing_tail = trailing_silence_seconds(p) if pacing_enabled and pacing.get('respect_existing_tail', True) else 0.0
+            added_pause = max(0.0, target_pause - existing_tail)
+            output = p
+            if added_pause > 1e-4:
+                pause_inputs = {'source': self.asset(p), 'target_pause': round(target_pause, 6),
+                                'existing_tail': round(existing_tail, 6), 'pacing': pacing}
+                total_duration = duration + added_pause
+                output = self.cached('voice-pause', pause_inputs, '.wav',
+                                     lambda target, source=p, added_pause=added_pause, total_duration=total_duration:
+                                     self.ff(['-i', source, '-af', f'apad=pad_dur={added_pause:.6f},atrim=duration={total_duration:.6f}',
+                                              '-ar', '48000', '-ac', '1', '-c:a', 'pcm_s16le', target]))
+            with wave.open(str(output), 'rb') as w:
+                total_frames = w.getnframes()
+                total_rate = w.getframerate()
+                total_duration = total_frames / total_rate
+            frames = math.ceil(total_duration * self.fps - 1e-8)
+            speech_duration = max(0.0, duration - existing_tail) if pacing_enabled and pacing.get('respect_existing_tail', True) else duration
+            speech_video_frames = math.ceil(speech_duration * self.fps - 1e-8)
+            result[sid] = {'path': output, 'duration': total_duration, 'frames': frames,
+                           'speech_duration': speech_duration,
+                           'speech_frames': speech_video_frames,
+                           'pause_seconds': max(0.0, total_duration - speech_duration),
+                           'sha256': file_hash(output)}
         return result
 
     def render(self, stage):
@@ -758,7 +858,11 @@ class Project:
             for sid in shot['narration']:
                 info = voices[sid]
                 timeline.append({'id': sid, 'shot': shot['id'], 'text': self.sentences[sid]['text'],
-                                 'start_frame': cursor, 'end_frame': cursor + info['frames'], 'audio_duration': info['duration']})
+                                 'start_frame': cursor, 'end_frame': cursor + info['frames'],
+                                 'subtitle_end_frame': cursor + info.get('speech_frames', info['frames']),
+                                 'audio_duration': info['duration'],
+                                 'speech_duration': info.get('speech_duration', info['duration']),
+                                 'pause_seconds': info.get('pause_seconds', 0.0)})
                 cursor += info['frames']
         # Cache paths contain only hashes, avoiding concat-demuxer path escaping.
         listing = self.cache / 'assembly.txt'
@@ -845,7 +949,11 @@ class Project:
             wrapped = wrap_caption(text, max_units)
             max_line_units = max(max_line_units, *(sum(char_units(ch) for ch in line) for line in wrapped))
             lines = '\n'.join(wrapped)
-            entries.append(f'{i}\n{stamp(row["start_frame"])} --> {stamp(row["end_frame"])}\n{lines}\n')
+            subtitle_end = row.get('end_frame', 0)
+            if not self.c.get('pacing', {}).get('subtitle_during_pause', False):
+                subtitle_end = row.get('subtitle_end_frame', subtitle_end)
+            require(subtitle_end >= row['start_frame'], f'{row["id"]}: subtitle interval is negative')
+            entries.append(f'{i}\n{stamp(row["start_frame"])} --> {stamp(subtitle_end)}\n{lines}\n')
         sub = self.c['subtitles']
         base_size = float(sub.get('size', 48))
         width_ratio = float(sub.get('max_width_ratio', 0.88))
@@ -865,6 +973,8 @@ class Project:
         require(frames and frames[-1] == timeline['total_frames'], 'Decoded frame count does not match timeline')
         rows = timeline['sentences']
         require(rows[0]['start_frame'] == 0 and all(a['end_frame'] == b['start_frame'] for a,b in zip(rows, rows[1:])), 'Timeline gaps or overlaps')
+        require(all(0 <= row.get('subtitle_end_frame', row['end_frame']) <= row['end_frame'] for row in rows),
+                'Subtitle interval exceeds its audio interval')
         samples = []
         for i, frame in enumerate(sorted(set([0, timeline['total_frames']//2, timeline['total_frames']-1]))):
             p = destination / f'{stage}-check-{i+1}.png'
