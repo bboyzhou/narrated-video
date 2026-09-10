@@ -32,7 +32,14 @@ POLYPHONE_HINTS = {
     '重兵': '重(zhòng)兵', '重复': '重(chóng)复', '将领': '将(jiàng)领',
     '将军': '将(jiàng)军', '朝廷': '朝(cháo)廷', '朝夕': '朝(zhāo)夕',
     '破敌': '破(pò)敌', '敌军': '敌(dí)军',
-    '降服': '降(xiáng)服', '投降': '投降(xiáng)'
+    '降服': '降(xiáng)服', '投降': '投降(xiáng)',
+    '钟繇': '钟(zhōng)繇(yáo)', '繇': '繇(yáo)',
+    '单于': '单(chán)于', '高干': '高(gāo)干(gàn)',
+    '傅干': '傅(fù)干(gàn)', '车骑': '车(chē)骑(qí)',
+    '逢纪': '逢(féng)纪(jì)', '沮授': '沮(jǔ)授(shòu)',
+    '审配': '审(shěn)配(pèi)', '贾逵': '贾(jiǎ)逵(kuí)',
+    '绛县': '绛(jiàng)县(xiàn)', '汾河': '汾(fén)河',
+    '谯县': '谯(qiáo)县', '浚仪': '浚(jùn)仪', '睢阳': '睢(suī)阳'
 }
 
 PAUSE_ROLES = {'default', 'continuation', 'dialogue', 'scene_change', 'dramatic', 'final'}
@@ -122,14 +129,22 @@ def compact(text):
 
 
 def pronunciation_audit(sentences):
-    """Return context-sensitive polyphone hits needing a human/listening check."""
+    """Return context-sensitive polyphone hits and whether their reading is documented."""
     hits = []
     for sentence in sentences:
         text = sentence['text']
-        found = [f'{phrase} → {hint}' for phrase, hint in POLYPHONE_HINTS.items() if phrase in text]
-        if found and not sentence.get('tts_text') and not sentence.get('pronunciation'):
-            hits.append({'id': sentence['id'], 'text': text, 'hints': found,
-                         'action': '试听确认；若模型误读，填写 pronunciation（优先）或 tts_text，字幕仍保留 text'})
+        phrases = [phrase for phrase in POLYPHONE_HINTS if phrase in text]
+        phrases = [phrase for phrase in phrases if not any(
+            phrase != other and phrase in other for other in phrases)]
+        found = [f'{phrase} → {POLYPHONE_HINTS[phrase]}' for phrase in phrases]
+        if not found:
+            continue
+        documented = bool(sentence.get('tts_text') or sentence.get('pronunciation') or sentence.get('pronunciation_note'))
+        hits.append({'id': sentence['id'], 'text': text, 'hints': found,
+                     'status': 'documented' if documented else 'needs_reading_confirmation',
+                     'action': ('已记录目标读音；试听确认，CosyVoice 若误读则填写 pronunciation 或 tts_text。'
+                                if documented else
+                                '试听确认；填写 pronunciation_note，并在模型误读时加入 pronunciation（优先）或 tts_text。')})
     return hits
 
 
