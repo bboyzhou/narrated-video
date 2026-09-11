@@ -5,7 +5,6 @@ Run --help and read ../references/project.md. No dependency installation.
 """
 import argparse
 from array import array
-import copy
 import hashlib
 import json
 import math
@@ -21,8 +20,6 @@ import wave
 from runtime import (resolve_paths, validate_paths, relaunch, path_report, doctor,
                      update_config, write_global_runtime)
 from composition import resolve_asset, validate_layers, render_args
-from generators import (build_video_job, file_sha256 as generated_file_sha256,
-                        provider_for_plan, validate_video_policy)
 
 VERSION = 1
 
@@ -370,9 +367,6 @@ class Project:
         self.work = self.root / '.narrated-video'
         self.cache = self.work / 'cache'
         self.state_path = self.work / 'state.json'
-        self.generated_index_path = self.work / 'generated-video-index.json'
-        self.generated_index = (read_json(self.generated_index_path).get('entries', {})
-                                if self.generated_index_path.is_file() else {})
         self.preflight_path = preflight_path(self.path)
         self.state = read_json(self.state_path) if self.state_path.exists() else {}
         self.runtime = resolve_paths(self.path, self.c.get('runtime', {}))
@@ -454,7 +448,14 @@ class Project:
                 self._text_list(plan.get('motion_constraints'), shot_id + '.motion_constraints')
                 generation = plan.get('generation')
                 require(isinstance(generation, dict), shot_id + '.generation must be an object')
-                provider_for_plan(plan, c)
+                require(generation.get('provider') == 'cogvideox_colab',
+                        shot_id + '.generation.provider must be cogvideox_colab')
+                require(generation.get('mode') == 'i2v', shot_id + '.generation.mode must be i2v')
+                require(type(generation.get('duration_target')) in (int, float) and
+                        1 <= generation['duration_target'] <= 30,
+                        shot_id + '.generation.duration_target must be 1..30 seconds')
+                require(type(generation.get('seed')) is int and 0 <= generation['seed'] <= 2**32 - 1,
+                        shot_id + '.generation.seed must be an integer in 0..2^32-1')
             require(plan.get('motion') == shot.get('motion', 'push'),
                     shot_id + ': storyboard motion must match project shot motion')
             require(type(plan.get('transition_seconds')) in (int, float) and
@@ -467,8 +468,6 @@ class Project:
             for key, default in (('layers', []), ('type', 'image'), ('source_start', 0), ('loop', False)):
                 require(plan.get(key, default) == shot.get(key, default),
                         shot_id + ': storyboard ' + key + ' must match project shot')
-
-        validate_video_policy(c, planned)
 
         demo = self.storyboard.get('demo')
         require(isinstance(demo, dict), 'storyboard.demo must be an object')
@@ -600,54 +599,6 @@ class Project:
     def selected(self, stage):
         return [self.shots[s] for s in self.c['demo']['shots']] if stage == 'demo' else self.c['shots']
 
-    def generated_job(self, shot):
-        plan = self.storyboard_shots.get(shot['id'])
-        if not plan or plan.get('asset_strategy') != 'generated_video':
-            return None
-        source = self.path_for(plan['source_image'])
-        job, backend = build_video_job(plan, plan['source_image'],
-                                       generated_file_sha256(source), self.c)
-        return {'job': job, 'backend': backend}
-
-    def resolved_shot(self, shot):
-        """Use an exact generated cache hit, otherwise retain the approved fallback."""
-        current = self.generated_job(shot)
-        if not current:
-            return copy.deepcopy(shot)
-        job = current['job']
-        generated = None
-        for candidate in (shot.get('generated_video'), self.generated_index.get(job['cache_key'])):
-            if not isinstance(candidate, dict):
-                continue
-            asset = candidate.get('asset')
-            if (candidate.get('provider') != job['provider'] or
-                    candidate.get('cache_key') != job['cache_key'] or not asset):
-                continue
-            path = self.path_for(asset)
-            if path.is_file() and candidate.get('sha256') == file_hash(path):
-                generated = candidate
-                break
-        if not generated:
-            return copy.deepcopy(shot)
-        resolved = copy.deepcopy(shot)
-        resolved.update({'type': 'video', 'asset': generated['asset'], 'motion': 'still',
-                         'source_start': 0, 'loop': False})
-        return resolved
-
-    def resolved_selected(self, stage):
-        return [self.resolved_shot(shot) for shot in self.selected(stage)]
-
-    def generated_video_status(self, shot):
-        current = self.generated_job(shot)
-        if not current:
-            return None
-        resolved = self.resolved_shot(shot)
-        ready = resolved.get('type') == 'video' and resolved.get('asset') != shot.get('asset')
-        return {'id': shot['id'], 'provider': current['job']['provider'],
-                'cache_key': current['job']['cache_key'],
-                'status': 'ready' if ready else 'fallback',
-                'asset': resolved.get('asset') if ready else shot.get('asset')}
-
     def script_key(self):
         return digest([{'id': s['id'], 'text': s['text']} for s in self.c['narration']])
 
@@ -681,15 +632,11 @@ class Project:
             warnings.append('Storyboard estimate differs from target duration by more than 20%; review pacing before approval')
         if not 20 <= demo_total <= 40:
             warnings.append('Demo estimate is outside the recommended 20-40 second range; confirm that the selected span is still representative')
-        generated = [self.generated_video_status(self.shots[plan['id']])
-                     for plan in self.storyboard['shots']
-                     if plan.get('asset_strategy') == 'generated_video']
         return {'status': 'passed', 'shots': len(self.storyboard['shots']),
                 'estimated_duration_seconds': total, 'target_duration_seconds': target,
                 'demo_estimated_duration_seconds': demo_total,
                 'demo_selection_reason': self.storyboard['demo']['selection_reason'],
                 'demo_validation_goals': self.storyboard['demo']['validation_goals'],
-                'generated_video': generated,
                 'warnings': warnings}
 
     def asset(self, value):
@@ -711,16 +658,12 @@ class Project:
         delivery = {s['id']: {k: s[k] for k in ('tts_text', 'pronunciation', 'pronunciation_note',
                                                  'pause_after', 'pause_role', 'rate_policy') if k in s}
                     for s in self.c['narration'] if s['id'] in {sid for shot in shots for sid in shot['narration']}}
-        resolved = [self.resolved_shot(shot) for shot in shots]
-        generated_assets = [self.asset(active['asset']) for shot, active in zip(shots, resolved)
-                            if active.get('asset') != shot.get('asset')]
         return digest({'script': self.script_key(), 'style': self.c['style'], 'voice': self.c['voice'],
                        'pacing': self.c.get('pacing', {}), 'delivery': delivery,
                        'storyboard': self.demo_storyboard_key(),
                        'output': self.output, 'subtitles': self.c['subtitles'], 'shots': shots, 'demo': self.c['demo'],
                        'motion': self.c.get('motion', {}),
                        'images': [self.asset(s['asset']) for s in shots], 'voices': voices,
-                       'generated_videos': generated_assets,
                        'layers': self.layer_assets(shots),
                        'music': [(m, self.asset(m['path'])) for m in self.c.get('music', [])],
                        'mix': self.c.get('mix', {}),
@@ -969,7 +912,7 @@ class Project:
 
     def render(self, stage):
         self.gate(stage)
-        selected = self.resolved_selected(stage)
+        selected = self.selected(stage)
         for shot in selected:
             for media in [shot, *shot.get('layers', [])]:
                 require(self.path_for(media['asset']).is_file(), 'Missing media: ' + media['asset'])
@@ -1231,32 +1174,20 @@ def initialize(path, source):
                                            'tolerance': 0.12, 'min_tempo': 0.88,
                                            'max_tempo': 1.12, 'min_units': 6}},
                        'subtitles': {'enabled': True, 'font': 'Microsoft YaHei', 'size': 48, 'min_size': 28, 'max_width_ratio': 0.88, 'margin': 30, 'max_chars': 24},
-                       'motion': {'easing': 'smoothstep', 'max_zoom': 0.06},
-                       'video_generation': {'enabled': False, 'provider': 'wan22_kaggle',
-                                            'execution': 'remote_manual', 'policy': 'highlights',
-                                            'max_scenes': 5, 'providers': {}},
-                       'narration': [], 'shots': [], 'demo': {'shots': []}, 'music': []})
+                      'motion': {'easing': 'smoothstep', 'max_zoom': 0.06},
+                      'narration': [], 'shots': [], 'demo': {'shots': []}, 'music': []})
     print('Created ' + str(path) + '; run preflight before drafting the spoken script or production plan.')
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['init', 'paths', 'configure', 'remember-runtime',
-                                            'doctor', 'preflight', 'check', 'record', 'tts',
-                                            'render', 'verify', 'video-prepare', 'video-import',
-                                            'video-status'])
+    parser.add_argument('command', choices=['init', 'paths', 'configure', 'remember-runtime', 'doctor', 'preflight', 'check', 'record', 'tts', 'render', 'verify'])
     parser.add_argument('project', help='Project JSON path')
     parser.add_argument('--source', help='Input .txt/.md or directory (init only)')
     parser.add_argument('--stage', choices=['script', 'storyboard', 'demo', 'full'], default='demo')
     parser.add_argument('--quote', help='Actual user approval reply (record only)')
     parser.add_argument('--skip', action='store_true', help='Record an explicitly authorized stage skip')
     parser.add_argument('--ffmpeg', help='Existing FFmpeg executable path')
-    parser.add_argument('--ffprobe', help='Optional ffprobe executable for video-import')
-    parser.add_argument('--output', help='video-prepare manifest output path')
-    parser.add_argument('--bundle', help='video-prepare ZIP output path')
-    parser.add_argument('--provider', help='Generated-video provider filter')
-    parser.add_argument('--results', help='Generated output directory or ZIP for video-import')
-    parser.add_argument('--jobs', help='video_jobs.json for video-import')
     for option in ('python', 'nltk-data', 'hf-home', 'hf-hub-cache', 'transformers-cache'):
         parser.add_argument('--' + option, help='User-selected path (configure only)')
     parser.add_argument('--offline', choices=['true', 'false'], help='Model cache offline mode (configure only)')
@@ -1307,28 +1238,7 @@ def main():
         return
     validation_stage = 'script' if args.stage == 'script' and args.command in ('check', 'record') else 'production'
     project = Project(args.project, args.ffmpeg, validation_stage)
-    if args.command == 'video-prepare':
-        require(args.stage in ('demo', 'full'), 'video-prepare stage must be demo or full')
-        project.gate(args.stage)
-        from prepare_video_jobs import prepare_video_jobs
-        print(json.dumps(prepare_video_jobs(project.storyboard_path, project.path, args.stage,
-                                            args.output, args.bundle, args.provider),
-                         ensure_ascii=False))
-    elif args.command == 'video-import':
-        require(args.stage in ('demo', 'full'), 'video-import stage must be demo or full')
-        require(args.results, 'video-import requires --results')
-        project.gate(args.stage)
-        from import_generated_videos import import_generated_videos
-        jobs = args.jobs or str(project.work / ('video-jobs-' + args.stage + '.json'))
-        print(json.dumps(import_generated_videos(project.path, args.results, jobs,
-                                                 args.ffprobe, project.ffmpeg),
-                         ensure_ascii=False))
-    elif args.command == 'video-status':
-        require(args.stage in ('demo', 'full'), 'video-status stage must be demo or full')
-        statuses = [project.generated_video_status(shot) for shot in project.selected(args.stage)]
-        print(json.dumps({'stage': args.stage, 'generated_video': [row for row in statuses if row]},
-                         ensure_ascii=False, indent=2))
-    elif args.command == 'check':
+    if args.command == 'check':
         project.require_preflight()
         audit = pronunciation_audit(config.get('narration', []))
         report = {'schema': 'passed', 'pronunciation_audit': audit,

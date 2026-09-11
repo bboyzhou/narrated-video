@@ -29,10 +29,9 @@ python $pipeline record $project --stage script --quote '用户实际批准回�
 python $pipeline check $project
 # agent 展示制作纲要、完整逐镜表、Demo 选择理由与验证目标；此处等待真实回复。
 python $pipeline record $project --stage storyboard --quote '用户实际批准回复'
-# 若 Demo 分镜声明 generated_video：先准备任务包，在外部 Worker 生成并导回，再渲染 Demo。
-python $pipeline video-prepare $project --stage demo --ffmpeg $ffmpeg
-python $pipeline video-import $project --stage demo --results D:/downloads/wan-output.zip --ffmpeg $ffmpeg
-python $pipeline video-status $project --stage demo --ffmpeg $ffmpeg
+# 若 Demo 分镜声明 generated_video：先准备任务包，外部生成并导回，再渲染 Demo。
+python D:/workspace/narrated-video/scripts/prepare_video_jobs.py D:/videos/example/storyboard.json --project $project --stage demo --output D:/videos/example/video_jobs.json
+python D:/workspace/narrated-video/scripts/import_generated_videos.py $project D:/videos/example/cogvideo-output.zip --jobs D:/videos/example/video_jobs.json
 python $pipeline tts $project --stage demo
 python $pipeline render $project --stage demo --ffmpeg $ffmpeg
 # agent 抽帧查看、试听，并将 Demo 交给用户；此处等待真实回复。
@@ -65,22 +64,7 @@ preflight 未通过或因运行环境/配音配置变化而失效时，`check`�
   "pacing": {"pause_policy": "semantic", "default_pause": 0.28, "continuation_pause": 0.18, "dialogue_pause": 0.4, "scene_change_pause": 0.5, "final_pause": 1.5, "respect_existing_tail": true, "subtitle_during_pause": false},
   "subtitles": {"enabled": true, "font": "Microsoft YaHei", "size": 48, "min_size": 28, "max_width_ratio": 0.88, "margin": 30, "max_chars": 24},
   "motion": {"easing": "smoothstep", "max_zoom": 0.06},
-  "video_generation": {
-    "enabled": true,
-    "provider": "wan22_kaggle",
-    "execution": "remote_manual",
-    "policy": "highlights",
-    "max_scenes": 5,
-    "providers": {
-      "wan22_kaggle": {
-        "model_revision": "实际固定的模型或 Kaggle Dataset 版本",
-        "size": "1280*704",
-        "max_frame_num": 121,
-        "world_size": 2,
-        "ulysses_size": 2
-      }
-    }
-  },
+  "video_generation": {"provider": "cogvideox_colab", "execution": "remote_manual", "local_gpu_required": false},
   "narration": [
     {"id": "N001", "text": "故事从这里开始。"},
     {"id": "N002", "text": "接下来，我们走近这段历史。"}
@@ -98,8 +82,6 @@ preflight 未通过或因运行环境/配音配置变化而失效时，`check`�
 ```
 
 `storyboard.json` 的完整结构、填写标准和用户审阅格式见 [分镜设计与审批](storyboard.md)。其中镜头 ID、口播映射、正负提示词、运镜和转场必须与项目 `shots` 一致；`check` 会拒绝漂移。示例素材必须换为真实文件；不需要配乐时使用空数组 `music: []`。风格是创作说明，不会自动改变图像或配音；具体行为由分镜、图片、voice、shots、subtitles、music 实现。字体需已安装，FFmpeg 可能静默替代缺失字体，必须检查抽帧。
-
-生成镜头仍在项目 `shots` 中声明可直接渲染的 fallback `type/asset/motion`。`video-import` 只增加带 provider、缓存键和哈希的 `generated_video` 结果；渲染器仅在结果与当前模型版本、源图、motion prompt、seed 和推理参数完全匹配时将其解析为视频素材。详见 [生成式视频](generated-video.md)。
 
 ### 配音和时间轴
 

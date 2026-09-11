@@ -5,7 +5,6 @@ from pathlib import Path
 
 from pipeline import Project, initialize, preflight_fingerprint, preflight_path, read_json, write_json
 from test_pipeline import storyboard_for
-from generators import file_sha256
 
 
 class StoryboardTests(unittest.TestCase):
@@ -92,49 +91,6 @@ class StoryboardTests(unittest.TestCase):
         write_json(self.root / 'storyboard.json', storyboard)
         with self.assertRaisesRegex(ValueError, 'project prompt must match'):
             self.project()
-
-    def test_generated_import_preserves_storyboard_approval_and_has_safe_fallback(self):
-        config = read_json(self.project_path)
-        config['video_generation'] = {
-            'enabled': True, 'provider': 'wan22_kaggle', 'policy': 'highlights',
-            'max_scenes': 1,
-            'providers': {'wan22_kaggle': {'model_revision': 'dataset-v1'}}}
-        source = self.root / 'image-1.png'
-        source.write_bytes(b'approved source image')
-        storyboard = read_json(self.root / 'storyboard.json')
-        storyboard['shots'][0].update({
-            'asset_strategy': 'generated_video', 'source_image': 'image-1.png',
-            'motion_prompt': 'The banner moves in a gentle breeze.',
-            'motion_constraints': ['preserve identity', 'preserve composition'],
-            'generation': {'provider': 'wan22_kaggle', 'mode': 'i2v',
-                           'duration_target': 5, 'seed': 17}})
-        write_json(self.root / 'storyboard.json', storyboard)
-        write_json(self.project_path, config)
-
-        project = self.project()
-        project.record('script', 'TEST FIXTURE: approve script')
-        project.record('storyboard', 'TEST FIXTURE: approve storyboard')
-        approved_key = self.project().storyboard_key()
-        before_demo = self.project().demo_key()
-        current = self.project().generated_job(config['shots'][0])['job']
-        generated_path = self.root / 'assets/generated-video/wan22_kaggle/output.mp4'
-        generated_path.parent.mkdir(parents=True)
-        generated_path.write_bytes(b'generated video placeholder')
-        config = read_json(self.project_path)
-        config['shots'][0]['generated_video'] = {
-            'provider': 'wan22_kaggle', 'cache_key': current['cache_key'],
-            'asset': generated_path.relative_to(self.root).as_posix(),
-            'sha256': file_sha256(generated_path)}
-        write_json(self.project_path, config)
-
-        imported = self.project()
-        self.assertEqual(imported.storyboard_key(), approved_key)
-        self.assertNotEqual(imported.demo_key(), before_demo)
-        self.assertEqual(imported.resolved_shot(imported.shots['S1'])['type'], 'video')
-        generated_path.write_bytes(b'corrupt replacement')
-        fallback = self.project().resolved_shot(self.project().shots['S1'])
-        self.assertEqual(fallback['type'], 'image')
-        self.assertEqual(fallback['asset'], 'image-1.png')
 
 
 if __name__ == '__main__':
