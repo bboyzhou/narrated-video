@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openai.local/narrated-video/video-job.schema.json",
+  "title": "narrated-video generated video job",
+  "type": "object",
+  "required": ["version", "project_id", "provider", "mode", "stage", "backend", "jobs", "cache_hits"],
+  "properties": {
+    "version": {"const": 2},
+    "project_id": {"type": "string", "minLength": 1},
+    "provider": {"type": "string", "minLength": 1},
+    "mode": {"const": "i2v"},
+    "stage": {"enum": ["demo", "full"]},
+    "backend": {"type": "object"},
+    "jobs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "image", "source_image_sha256", "prompt", "constraints", "provider", "mode", "seed", "duration_target", "cache_key", "output"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[A-Za-z0-9_-]+$"},
+          "image": {"type": "string"},
+          "source_image_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "prompt": {"type": "string", "minLength": 1},
+          "constraints": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "provider": {"type": "string"},
+          "mode": {"const": "i2v"},
+          "seed": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+          "duration_target": {"type": "number", "minimum": 1, "maximum": 30},
+          "cache_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "output": {"type": "string"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "cache_hits": {"type": "array"}
+  },
+  "additionalProperties": false
+}
+

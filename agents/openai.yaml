@@ -1,4 +1,4 @@
 interface:
   display_name: "图片运镜解说视频"
-  short_description: "从口播稿、完整分镜到样片确认，再增量制作图片解说视频"
-  default_prompt: "用 $narrated-video 将这段文案制作成图片运镜解说视频，先确认解说稿和完整分镜，再制作 Demo。"
+  short_description: "从完整分镜到 Demo，用图片运镜与可选 AI 动态镜头制作解说视频"
+  default_prompt: "用 $narrated-video 将这段文案制作成图片运镜解说视频；动作重点镜头可使用 Wan2.2/Kaggle，先确认解说稿和完整分镜，再制作 Demo。"
