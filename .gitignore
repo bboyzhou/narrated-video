@@ -1,7 +1,12 @@
 __pycache__/
 *.py[cod]
+.test-output/
 .narrated-video/
 deliverables/
+kaggle/kernel-metadata.json
+.env
+.env.*
+*.log
 *.mp4
 *.wav
 *.mp3

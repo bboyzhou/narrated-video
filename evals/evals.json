@@ -56,6 +56,13 @@
       "prompt": "把这段人物历史故事做成图片解说视频，之前的 Demo 经常出现人物服装和场景不连续。请先把制作方案给我确认。",
       "expected_output": "先运行并通过 preflight；通过后制作纲要明确受众、平台、时长、叙事弧与视听方向，逐镜说明主体、动作、环境、景别、构图、光色和连续性锚点，并给出可执行的正负提示词及代表性 Demo 选择。",
       "files": []
+    },
+    {
+      "id": 9,
+      "name": "wan-kaggle-demo-batch",
+      "prompt": "这个历史解说项目的文案和完整分镜已批准。Demo 有两个动作重点镜头要用 Wan2.2 TI2V-5B，在 Kaggle 双 T4 上一次加载模型批量生成；其余镜头继续图片运镜。请准备任务包，失败时不要阻塞 Demo，也不要改掉原图片。",
+      "expected_output": "检查 storyboard 与批准门禁，为 wan22_kaggle 生成单个 Demo 批量任务包；缓存键覆盖模型版本、源图、motion prompt、seed 与推理参数；说明 Kaggle 实测限制。导入成功结果时保留项目镜头的图片 fallback，失败、缺失或损坏的输出继续使用图片运镜。",
+      "files": []
     }
   ]
 }
