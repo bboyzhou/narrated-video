@@ -92,6 +92,7 @@ class VideoGenerator:
             'image': image,
             'source_image_sha256': image_sha256,
             'prompt': prompt,
+            'negative_prompt': plan.get('negative_prompt', ''),
             'constraints': constraints,
             'provider': self.provider,
             **generation,

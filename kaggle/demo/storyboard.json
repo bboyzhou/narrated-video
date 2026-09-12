@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "shots": [
+    {
+      "id": "S001",
+      "asset_strategy": "generated_video",
+      "source_image": "input/S001.png",
+      "motion_prompt": "The subject remains consistent while the fabric and background atmosphere move gently. Slow cinematic push-in.",
+      "motion_constraints": ["preserve identity", "preserve composition", "no text or watermark"],
+      "generation": {
+        "provider": "wan22_kaggle",
+        "mode": "i2v",
+        "duration_target": 4,
+        "seed": 38123
+      }
+    }
+  ],
+  "demo": {
+    "shots": ["S001"],
+    "selection_reason": "Single representative I2V shot to validate dual-T4 runtime and output contract",
+    "validation_goals": ["two CUDA devices", "stable motion", "valid MP4", "fallback remains available"]
+  }
+}

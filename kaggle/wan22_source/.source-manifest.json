@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/Wan-Video/Wan2.2",
+  "commit": "42bf4cfaa384bc21833865abc2f9e6c0e67233dc",
+  "model": "Wan-AI/Wan2.2-TI2V-5B",
+  "weights_dataset": "ihsannika/wan2-2-ti2v-5b",
+  "weights_layout": "Wan2.2-TI2V-5B",
+  "license": "Apache-2.0"
+}

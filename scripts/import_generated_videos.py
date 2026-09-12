@@ -76,6 +76,17 @@ def probe(path, ffprobe=None, ffmpeg=None):
             'duration': duration, 'codec': video.group(1).strip()}
 
 
+def validate_decodable_video(path, ffmpeg):
+    executable = ffmpeg or os.environ.get('FFMPEG') or shutil.which('ffmpeg')
+    require(executable, 'FFmpeg is required for full generated-video validation')
+    result = subprocess.run([executable, '-hide_banner', '-nostdin', '-xerror', '-i', str(path),
+                             '-map', '0:v:0', '-f', 'null', '-'],
+                            capture_output=True, text=True, encoding='utf-8',
+                            errors='replace', check=False)
+    require(result.returncode == 0,
+            'FFmpeg full decode failed for generated video ' + str(path) + ': ' + result.stderr[-500:])
+
+
 def safe_extract(archive, destination):
     destination = Path(destination).resolve()
     for member in archive.infolist():
@@ -192,7 +203,19 @@ def import_generated_videos(project_path, results_path, jobs_path=None, ffprobe=
             if not source:
                 failed.append({'id': shot_id, 'reason': 'output MP4 missing; fallback remains active'})
                 continue
-            info = probe(source, ffprobe, ffmpeg)
+            try:
+                info = probe(source, ffprobe, ffmpeg)
+                validate_decodable_video(source, ffmpeg)
+                expected_duration = job.get('duration_target')
+                if job.get('frame_num') and job.get('output_fps'):
+                    expected_duration = float(job['frame_num']) / float(job['output_fps'])
+                if expected_duration:
+                    tolerance = max(0.15, 2.0 / float(job.get('output_fps', 24)))
+                    require(info['duration'] + tolerance >= float(expected_duration),
+                            shot_id + ': generated video is shorter than the requested duration')
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                failed.append({'id': shot_id, 'reason': str(error) + '; fallback remains active'})
+                continue
             expected = manifest.get('backend', {}).get('size')
             if expected and '*' in expected:
                 width, height = [int(value) for value in expected.split('*')]

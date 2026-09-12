@@ -162,6 +162,13 @@ def doctor(project, config, voice, ffmpeg_override=None, deep=False):
             checks.append({'name': name, 'ok': True, 'detail': detail})
         except Exception as error:
             checks.append({'name': name, 'ok': False, 'detail': str(error)})
+    if engine in ('melotts', 'cosyvoice'):
+        def voice_revision():
+            revision = voice.get('revision')
+            if not isinstance(revision, str) or not revision.strip() or revision in ('main', 'latest'):
+                raise ValueError(engine + ' requires a pinned voice.revision for cache safety')
+            return revision
+        check('voice_revision', voice_revision)
     def ffmpeg_runtime():
         if not ffmpeg:
             raise ValueError('FFmpeg not found; select its executable')
@@ -222,7 +229,8 @@ def doctor(project, config, voice, ffmpeg_override=None, deep=False):
             command = voice.get('command')
             if not isinstance(command, list) or not command:
                 raise ValueError('CosyVoice requires voice.command')
-            if '{output}' not in command or ('{text_file}' not in command and '{text}' not in command):
+            command_text = ' '.join(str(item) for item in command)
+            if '{output}' not in command_text or ('{text_file}' not in command_text and '{text}' not in command_text):
                 raise ValueError('CosyVoice command requires {output} and {text_file} or {text}')
             batch_command = voice.get('batch_command')
             if batch_command is not None:
@@ -255,7 +263,7 @@ def doctor(project, config, voice, ffmpeg_override=None, deep=False):
                     command = voice.get('batch_command') or voice['command']
                     if voice.get('batch_command'):
                         jobs_file.write_text(json.dumps({'version': 1,
-                                                         'offline': bool(runtime.get('offline', False)),
+                                                         'offline': bool(config.get('offline', False)),
                                                          'jobs': [{'id': 'preflight', 'text': text,
                                                                    'output': str(output)}]},
                                                         ensure_ascii=False, indent=2), encoding='utf-8')
@@ -267,7 +275,6 @@ def doctor(project, config, voice, ffmpeg_override=None, deep=False):
                         value = value.replace('{speaker}', str(voice.get('speaker', '中文男')))
                         value = value.replace('{speed}', str(voice.get('speed', 1)))
                         if '{ffmpeg}' in value:
-                            ffmpeg = runtime.get('ffmpeg')
                             if not ffmpeg:
                                 raise ValueError('CosyVoice batch_command uses {ffmpeg}, but FFmpeg is unavailable')
                             value = value.replace('{ffmpeg}', str(ffmpeg))

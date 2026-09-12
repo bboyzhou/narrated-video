@@ -1,11 +1,20 @@
 ---
 name: narrated-video
-description: 将对话文案或本地文本制作成图片运镜解说视频，也用于继续或局部修改已有 narrated-video 项目。适用于“把这段文字做成解说视频”“用这些图片配解说和字幕”“生成图生视频素材”“先做视频样片”等请求，支持图片/视频图层与关键帧动画、可选的外部生成式视频 provider、离线素材库、制作纲要与分镜设计、文案/分镜/Demo 确认、可选风格、MeloTTS、CosyVoice 或已有配音、配乐和增量渲染。不用于仅润色文案、单独生成图片或普通视频剪辑。
+description: 将对话文案或本地文本制作成图片运镜解说视频，也用于继续或局部修改 narrated-video 项目。用户提到 narrated-video、图片解说、分镜、配音、字幕、Demo、图生视频、Wan2.2、TI2V、Kaggle、任务包、断点恢复、OOM 降级或 AI 视频 fallback 时都使用本 skill；支持图片/视频图层、关键帧动画、MeloTTS、CosyVoice、离线素材库、外部生成式视频和增量渲染。不用于仅润色文案、单独生成图片或普通视频剪辑。
 ---
 
 # 图片运镜解说视频
 
 使用随附 `scripts/pipeline.py` 和项目 JSON 复用制作流程，不为每个主题重写脚本。画面与解说时间轴分离，支持 `type: image/video` 镜头和图片/视频图层的位置、缩放、旋转、透明度关键帧。图片运镜默认使用平滑缓动和 FFmpeg 亚像素 cubic 重采样，减少起停跳步与平移抖动。人物骨骼动作和自动抠图不在当前能力内；生成式视频是可选的外部素材生成阶段，生成的 MP4 统一作为现有 `type: video` 素材进入时间轴，不改变渲染器职责。
+
+## 核心决策
+
+- 把 Wan 视为“短镜头动态素材生成器”，不是整段视频渲染器；每个生成镜头必须有已批准的图片运镜或本地视频 fallback。
+- 稳定性优先于吞吐：当前实现采用官方原生 `WanTI2V` Worker，一次加载模型并顺序处理有限数量 job；首个可验证基线使用官方支持的 FSDP + Ulysses 多 GPU路径，单 T4 仅作为明确标注的实验 profile。
+- 外部生成失败只能影响当前镜头。结果缺失、损坏、缓存键失配、OOM 或 Worker 被杀时，保留失败记录并继续使用批准的 fallback；不要让整部 narrated-video 失败。
+- Kaggle 运行时必须可审计、可离线复现：固定模型/源码/依赖版本，显式模型路径，启动前预检；不要依赖启动时联网或全盘模糊搜索。
+
+**生成式视频任务的反模式：** 不要每个镜头启动一个 Notebook，不要同时启动多个完整模型 Worker，不要在 CUDA OOM 后同一 Python 进程继续重试，不要把两个 T4 当作一张 32GB 显卡，不要把 `convert_model_dtype` 宣称为 Q8/INT8，不要用动态 `pip install` 或 `main/latest` 权重。`torchrun`、FSDP 和 Ulysses 只在 native multi-GPU profile 中使用，不能被误写成独立 Worker 并发。
 
 ## 先判断当前阶段
 
@@ -20,9 +29,12 @@ description: 将对话文案或本地文本制作成图片运镜解说视频，�
 | 初始化、分句、镜头配置、渲染及验证 | [项目配置和命令](references/project.md) |
 | 动态素材叠加、视频镜头、关键帧和离线素材库 | [动态素材合成](references/composition.md) |
 | Wan2.2/Kaggle、图生视频、任务包、缓存和结果导入 | [生成式视频](references/generated-video.md) |
+| 文生视频/图生视频 provider 对比与测试 | [视频 provider 测试矩阵](references/video-provider-matrix.md) |
 | 设计制作纲要、完整分镜及 Demo 验证目标 | [分镜设计与审批](references/storyboard.md) |
 | 首次选择或切换软件/资源目录、启动失败 | [运行环境](references/runtime.md) |
 | 选择或调整美术、口播与节奏 | [风格预设](references/styles.md) |
+
+按场景读取参考：Kaggle/Wan 任务才读取 [生成式视频](references/generated-video.md)；普通初始化读取 [项目配置和命令](references/project.md)；普通图片运镜任务不要加载 Kaggle 参考。
 
 ## 文案与制作确认
 
@@ -31,7 +43,7 @@ description: 将对话文案或本地文本制作成图片运镜解说视频，�
 3. 将批准稿存为纯口播文本，按自然停顿分成带稳定 ID 的短句。合并后须与批准稿一致；不要为了字幕长度删改内容。遇到多音字或专名误读时，优先使用句子的 `pronunciation`（含 `text`/`proxy`/`reading`）或 `pronunciation_note` 记录目标读音；若当前 TTS 引擎不支持音素输入，再使用仅供 TTS 的同音同调发音代理填入 `tts_text`。`text` 必须保持批准稿原文，字幕始终取 `text`，并在 Demo 中复核。用实际用户回复记录 `script` 批准。
 4. 文案批准后、生成任何图片或配音前，编写 `storyboard.json`：先确定受众、平台、目标时长、叙事弧、节奏、视听方向、连续性锚点与限制，再为每个镜头写清叙事作用、对应口播、预计时长、主体/动作/场景、景别、构图、光色、连续性、素材策略、正负提示词、运镜和转场。选择连续约 20–40 秒的代表性 Demo，并写明选段理由与需验证的问题。按 [分镜设计与审批](references/storyboard.md) 将完整分镜以审阅表交给用户；收到真实批准回复并记录 `storyboard` 后，才生成素材或配音。不能用简略关键词、待定项或仅有图片提示词的镜头表代替完整分镜。
 5. 准备配乐前先询问创作者意图：情绪、时代/地域气质、乐器或类型、能量曲线、是否需要人声、目标平台和授权要求。根据回答检索至少 3 个候选，提供可试听预览链接、时长、来源和许可；创作者试听并明确选定后才下载。没有可用试听能力时只提供链接并暂停，不代替用户判断满意度。未获选择时使用 `music: []`，不得默默复用上一个项目或默认曲目。
-6. 分镜批准后只准备 Demo 部分的图像和配音；若 Demo 镜头使用 `generated_video`，运行 `pipeline.py video-prepare --stage demo` 生成 provider-independent 任务包，由外部 Wan2.2/Kaggle 或兼容 provider 批量生成，再用 `pipeline.py video-import` 导回。生成结果只作为运行时 `type: video` 素材，项目镜头的原图片/视频继续作为 fallback。查看抽帧、试听并交给用户确认。生成图片或视频时逐镜使用已批准的正负提示词、motion prompt 和连续性锚点，不临场改写画面意图；确需改变则更新分镜并重新确认。生成失败、缓存失配或输出损坏时按生成视频、本地视频、图片运镜的顺序降级。
+6. 分镜批准后只准备 Demo 部分的图像和配音；若 Demo 镜头使用 `generated_video`，读取 [生成式视频](references/generated-video.md)，运行 `pipeline.py video-prepare --stage demo` 生成任务包，由外部 Wan2.2/Kaggle 或兼容 provider 批量生成，再用 `pipeline.py video-import` 导回。先做 smoke/preflight，再做正式生成。生成结果只作为运行时 `type: video` 素材，项目镜头的原图片/视频继续作为 fallback。查看抽帧、试听并交给用户确认。生成失败、缓存失配或输出损坏时按“已批准生成视频 → 已批准本地/现有视频 → 已批准图片运镜”降级。
 7. 用实际回复记录 Demo 批准后，再生成其余素材和配音、渲染全片。明确授权跳过某阶段时，在对应记录中保留用户原话和跳过范围。“开始制作”本身不表示跳过分镜或 Demo。
 
 批准与路径选择都以实际对话为准；`record/configure` 只保存记录，不能代替用户做决定。为避免反复确认，将当前确实需要用户决定的问题集中提出，已有明确选择直接沿用。审阅分镜时先给制作纲要，再给逐镜表与 Demo 选择，不能只发送文件路径或原始 JSON 让用户自行猜测制作效果。

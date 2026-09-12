@@ -2,7 +2,6 @@
 import copy
 import contextlib
 import io
-import json
 import os
 from pathlib import Path
 import struct
@@ -156,7 +155,8 @@ class MediaTests(unittest.TestCase):
         write_json(preflight_path(project_file), {'ok': True, 'test_fixture': True,
                     'fingerprint': preflight_fingerprint(project_file, c, self.ffmpeg)})
         p = Project(project_file, self.ffmpeg)
-        p.record('script', 'TEST ONLY'); p.record('storyboard', 'TEST ONLY')
+        p.record('script', 'TEST ONLY')
+        p.record('storyboard', 'TEST ONLY')
         with contextlib.redirect_stdout(io.StringIO()):
             p.render('demo')
             p.record('demo', 'TEST ONLY')
@@ -171,7 +171,8 @@ class MediaTests(unittest.TestCase):
         before = q.demo_key()
         c['shots'][2]['layers'][0]['keyframes'][0]['x'] = .1
         board['shots'][2]['layers'] = c['shots'][2]['layers']
-        write_json(project_file, c); write_json(self.root / 'storyboard.json', board)
+        write_json(project_file, c)
+        write_json(self.root / 'storyboard.json', board)
         q = Project(project_file, self.ffmpeg)
         self.assertEqual(before, q.demo_key())
         with self.assertRaisesRegex(ValueError, 'Storyboard approval'):
@@ -192,7 +193,8 @@ class MediaTests(unittest.TestCase):
         # Invalid video offsets must fail before silently omitting the layer/video.
         c['shots'][1]['source_start'] = 99
         board['shots'][1]['source_start'] = 99
-        write_json(project_file, c); write_json(self.root / 'storyboard.json', board)
+        write_json(project_file, c)
+        write_json(self.root / 'storyboard.json', board)
         q = Project(project_file, self.ffmpeg)
         q.record('storyboard', 'TEST ONLY')
         with self.assertRaisesRegex(ValueError, 'No decodable video frame'):

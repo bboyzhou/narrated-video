@@ -53,7 +53,7 @@ python $pipeline record $project --stage storyboard --quote '用户实际批准�
   "generation": {
     "provider": "wan22_kaggle",
     "mode": "i2v",
-    "duration_target": 6,
+    "duration_target": 5,
     "seed": 42
   }
 }

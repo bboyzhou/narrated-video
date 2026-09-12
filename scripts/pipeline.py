@@ -573,7 +573,8 @@ class Project:
             require(voice.get('provider', 'cosyvoice').lower() == 'cosyvoice', 'cosyvoice engine requires provider=cosyvoice')
             require(isinstance(voice.get('command'), list) and voice['command'],
                     'CosyVoice requires voice.command: an argv list with {text_file} and {output} placeholders')
-            require('{output}' in voice['command'] and ('{text_file}' in voice['command'] or '{text}' in voice['command']),
+            command_text = ' '.join(str(item) for item in voice['command'])
+            require('{output}' in command_text and ('{text_file}' in command_text or '{text}' in command_text),
                     'CosyVoice command must include {output} and {text_file} or {text}')
             batch_command = voice.get('batch_command')
             if batch_command is not None:
@@ -583,6 +584,11 @@ class Project:
                         'CosyVoice batch_command must include {jobs_file}')
             require(voice.get('model') and voice.get('model_path'), 'CosyVoice requires model and model_path')
             require(voice.get('license'), 'CosyVoice requires model license notes')
+        if voice['engine'] in ('melotts', 'cosyvoice'):
+            revision = voice.get('revision')
+            require(isinstance(revision, str) and revision.strip() and revision not in ('main', 'latest'),
+                    voice['engine'] + ' requires a pinned voice.revision for cache safety')
+        if voice['engine'] == 'cosyvoice':
             require(self.path_for(voice['model_path']).exists(), 'CosyVoice model_path unavailable: ' + str(voice['model_path']))
         require(0.1 <= voice.get('speed', 1) <= 3, 'voice.speed must be 0.1..3')
         require(c['demo'].get('start_seconds', 0) >= 0, 'Demo start_seconds cannot be negative')
@@ -1031,7 +1037,7 @@ class Project:
                 filters = []
                 if transition:
                     args += ['-ss', durations[i-1] / fps, '-i', raw[i-1]]
-                    filters += [f'[1:v]settb=AVTB,setpts=PTS-STARTPTS[prev]', '[0:v]settb=AVTB,setpts=PTS-STARTPTS[cur]',
+                    filters += ['[1:v]settb=AVTB,setpts=PTS-STARTPTS[prev]', '[0:v]settb=AVTB,setpts=PTS-STARTPTS[cur]',
                                 f'[prev][cur]xfade=transition=fade:duration={transition/fps}:offset=0,trim=duration={n/fps},setpts=PTS-STARTPTS[v]']
                 else:
                     filters += [f'[0:v]trim=duration={n/fps},setpts=PTS-STARTPTS[v]']

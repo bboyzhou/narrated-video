@@ -5,8 +5,10 @@ from .base import VideoGenerator, require
 class WanKaggleGenerator(VideoGenerator):
     provider = 'wan22_kaggle'
     defaults = {
+        'engine': 'wan_native',
         'model': 'Wan-AI/Wan2.2-TI2V-5B',
         'task': 'ti2v-5B',
+        'profile': 'native_dual_t4',
         'size': '1280*704',
         'fps': 24,
         'max_frame_num': 121,
@@ -18,11 +20,16 @@ class WanKaggleGenerator(VideoGenerator):
         'gpu_mode': 'dual_t4',
         'dit_fsdp': True,
         't5_fsdp': True,
+        't5_cpu': False,
+        'convert_model_dtype': False,
+        'offload_model': False,
         'ulysses_size': 2,
     }
 
     def validate_backend(self, backend):
         super().validate_backend(backend)
+        require(backend.get('engine') == 'wan_native',
+                'wan22_kaggle engine must be wan_native')
         require(backend.get('task') == 'ti2v-5B', 'wan22_kaggle task must be ti2v-5B')
         require(backend.get('size') in ('1280*704', '704*1280'),
                 'wan22_kaggle size must be 1280*704 or 704*1280')
@@ -37,6 +44,10 @@ class WanKaggleGenerator(VideoGenerator):
                 'wan22_kaggle world_size must be a positive integer')
         require(backend.get('ulysses_size') == backend['world_size'],
                 'wan22_kaggle ulysses_size must equal world_size')
+        require(not backend.get('t5_cpu') or not backend.get('t5_fsdp'),
+                'wan22_kaggle t5_cpu is incompatible with t5_fsdp')
+        require(not backend.get('convert_model_dtype') or not backend.get('dit_fsdp'),
+                'wan22_kaggle convert_model_dtype is incompatible with dit_fsdp')
         require(24 % backend['ulysses_size'] == 0,
                 'Wan2.2 TI2V-5B has 24 attention heads; ulysses_size must divide 24')
         require(1 <= int(backend.get('sample_steps', 0)) <= 100,
@@ -47,8 +58,10 @@ class WanKaggleGenerator(VideoGenerator):
     def normalize_generation(self, generation, backend):
         value = super().normalize_generation(generation, backend)
         requested = float(value['duration_target']) * backend['fps']
+        require(requested <= backend['max_frame_num'],
+                'wan22_kaggle duration_target exceeds max_frame_num/fps; split the shot or increase max_frame_num')
         frame_num = 1 + 4 * round((requested - 1) / 4)
-        frame_num = max(5, min(backend['max_frame_num'], frame_num))
+        frame_num = max(5, frame_num)
         value.update({
             'frame_num': frame_num,
             'output_fps': backend['fps'],

@@ -1,0 +1,55 @@
+{
+  "version": 2,
+  "project_id": "demo",
+  "provider": "wan22_kaggle",
+  "mode": "i2v",
+  "stage": "demo",
+  "backend": {
+    "engine": "wan_native",
+    "model": "Wan-AI/Wan2.2-TI2V-5B",
+    "task": "ti2v-5B",
+    "size": "1280*704",
+    "fps": 24,
+    "max_frame_num": 121,
+    "sample_steps": 20,
+    "sample_shift": 5.0,
+    "sample_solver": "unipc",
+    "sample_guide_scale": 5.0,
+    "world_size": 2,
+    "gpu_mode": "dual_t4",
+    "dit_fsdp": true,
+    "t5_fsdp": true,
+    "ulysses_size": 2,
+    "model_revision": "kaggle:ihsannika/wan2-2-ti2v-5b@dataset-9586885",
+    "offload_model": true,
+    "convert_model_dtype": false,
+    "t5_cpu": false
+  },
+  "jobs": [
+    {
+      "id": "S001",
+      "image": "S001.png",
+      "source_image_sha256": "93878ea0f239a4c7568a38b564c864a3912d57439b4c5861b501471ca5dee0e5",
+      "prompt": "The subject remains consistent while the fabric and background atmosphere move gently. Slow cinematic push-in.",
+      "constraints": [
+        "preserve identity",
+        "preserve composition",
+        "no text or watermark"
+      ],
+      "provider": "wan22_kaggle",
+      "mode": "i2v",
+      "seed": 38123,
+      "duration_target": 4.0,
+      "frame_num": 97,
+      "output_fps": 24,
+      "sample_steps": 20,
+      "sample_shift": 5.0,
+      "sample_solver": "unipc",
+      "sample_guide_scale": 5.0,
+      "cache_key": "d77341bb6a6410f7efae8278102a15f1ef91bde7f2f2dd37c6d3b20a7bddc658",
+      "output": "output/S001.mp4",
+      "fallback_asset": null
+    }
+  ],
+  "cache_hits": []
+}

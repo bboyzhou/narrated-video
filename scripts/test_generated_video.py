@@ -9,9 +9,9 @@ import zipfile
 from pathlib import Path
 
 from generators import build_video_job, file_sha256
+from generators.wan_kaggle import WanKaggleGenerator
 from import_generated_videos import import_generated_videos
-from pipeline import (Project, initialize, preflight_fingerprint, preflight_path,
-                      read_json, write_json)
+from pipeline import initialize, read_json, write_json
 from prepare_video_jobs import prepare_video_jobs
 
 
@@ -98,7 +98,7 @@ class GeneratedVideoTests(unittest.TestCase):
         results = self.root / 'output'
         results.mkdir()
         subprocess.run([self._ffmpeg(), '-hide_banner', '-loglevel', 'error', '-y',
-                        '-f', 'lavfi', '-i', 'color=c=blue:s=64x64:r=8', '-t', '1',
+                         '-f', 'lavfi', '-i', 'color=c=blue:s=64x64:r=8', '-t', '4',
                         '-an', results / 'S001.mp4'], check=True)
         cache_key = build_video_job(self.plan, 'input/S001.png',
                                     file_sha256(self.image), project)[0]['cache_key']
@@ -123,6 +123,36 @@ class GeneratedVideoTests(unittest.TestCase):
                                       self.root / 'second-jobs.json')
         self.assertEqual(prepared['jobs'], 0)
         self.assertEqual(prepared['cache_hits'], 1)
+
+    @unittest.skipUnless(os.environ.get('FFMPEG') or shutil.which('ffmpeg'),
+                         'FFmpeg unavailable')
+    def test_import_rejects_truncated_video(self):
+        self.storyboard.unlink()
+        initialize(self.project, None)
+        project = read_json(self.project)
+        project.update({'video_generation': {'enabled': True, 'provider': 'cogvideox_colab'},
+                        'shots': [{'id': 'S001', 'type': 'image', 'asset': 'source.png',
+                                   'narration': ['N1'], 'motion': 'push', 'transition': .2,
+                                   'prompt': 'x', 'negative_prompt': 'y'}],
+                        'demo': {'shots': ['S001']}})
+        write_json(self.project, project)
+        results = self.root / 'output'
+        results.mkdir()
+        subprocess.run([self._ffmpeg(), '-hide_banner', '-loglevel', 'error', '-y',
+                         '-f', 'lavfi', '-i', 'color=c=blue:s=64x64:r=8', '-t', '1',
+                         '-an', results / 'S001.mp4'], check=True)
+        jobs = self.root / 'video_jobs.json'
+        write_json(jobs, {'version': 2, 'provider': 'cogvideox_colab', 'backend': {},
+                          'jobs': [{'id': 'S001', 'duration_target': 4,
+                                    'cache_key': 'b' * 64, 'output': 'S001.mp4'}]})
+        result = import_generated_videos(self.project, results, jobs, ffmpeg=self._ffmpeg())
+        self.assertEqual(result['failed'][0]['id'], 'S001')
+        self.assertNotIn('generated_video', read_json(self.project)['shots'][0])
+
+    def test_wan_duration_above_worker_limit_is_rejected(self):
+        backend = {**WanKaggleGenerator.defaults, 'model_revision': 'dataset-v1'}
+        with self.assertRaisesRegex(ValueError, 'exceeds max_frame_num'):
+            WanKaggleGenerator().normalize_generation({'seed': 1, 'duration_target': 6}, backend)
 
     @unittest.skipUnless(os.environ.get('FFMPEG') or shutil.which('ffmpeg'),
                          'FFmpeg unavailable')

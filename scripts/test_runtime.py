@@ -159,6 +159,7 @@ class RuntimeTests(unittest.TestCase):
                 output = encoders
             return subprocess.CompletedProcess(command, 0, stdout=output, stderr='')
         voice = {'engine': 'cosyvoice', 'model_path': str(model),
+                 'revision': '1',
                  'command': ['python', 'single.py', '{text_file}', '{output}'],
                  'batch_command': ['python', 'batch.py', '{jobs_file}']}
         with patch('runtime.subprocess.run', side_effect=fake_run):
@@ -172,12 +173,50 @@ class RuntimeTests(unittest.TestCase):
         model = self.root / 'cosyvoice-model'
         model.mkdir()
         voice = {'engine': 'cosyvoice', 'model_path': str(model),
+                 'revision': '1',
                  'command': ['python', 'single.py', '{text_file}', '{output}'],
                  'batch_command': ['python', 'batch.py']}
         report = doctor(self.project, {}, voice)
         detail = next(item['detail'] for item in report['checks']
                       if item['name'] == 'cosyvoice_configuration')
         self.assertIn('{jobs_file}', detail)
+
+    def test_deep_cosyvoice_batch_preflight_runs_sample(self):
+        executable = self.root / 'ffmpeg'
+        executable.write_bytes(b'test')
+        model = self.root / 'cosyvoice-model'
+        model.mkdir()
+        filters = 'perspective xfade subtitles loudnorm dynaudnorm sidechaincompress alimiter'
+        encoders = 'libx264 aac'
+
+        def fake_run(command, **kwargs):
+            if '-version' in command:
+                output = 'ffmpeg version test\n'
+            elif '-filters' in command:
+                output = filters
+            elif '-encoders' in command:
+                output = encoders
+            else:
+                jobs_path = Path(next(item for item in command if str(item).endswith('jobs.json')))
+                import json
+                import wave
+                payload = json.loads(jobs_path.read_text(encoding='utf-8'))
+                output_path = Path(payload['jobs'][0]['output'])
+                with wave.open(str(output_path), 'wb') as audio:
+                    audio.setnchannels(1)
+                    audio.setsampwidth(2)
+                    audio.setframerate(16000)
+                    audio.writeframes(b'\0\0' * 1600)
+                output = ''
+            return subprocess.CompletedProcess(command, 0, stdout=output, stderr='')
+
+        voice = {'engine': 'cosyvoice', 'model_path': str(model), 'revision': '1',
+                 'command': ['python', 'single.py', '{text_file}', '{output}'],
+                 'batch_command': ['python', 'batch.py', '{jobs_file}']}
+        with patch('runtime.subprocess.run', side_effect=fake_run):
+            report = doctor(self.project, {'ffmpeg': str(executable)}, voice, deep=True)
+        sample = next(item for item in report['checks'] if item['name'] == 'cosyvoice_sample')
+        self.assertTrue(sample['ok'], report)
 
 
 if __name__ == '__main__':

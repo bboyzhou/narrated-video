@@ -63,6 +63,34 @@
       "prompt": "这个历史解说项目的文案和完整分镜已批准。Demo 有两个动作重点镜头要用 Wan2.2 TI2V-5B，在 Kaggle 双 T4 上一次加载模型批量生成；其余镜头继续图片运镜。请准备任务包，失败时不要阻塞 Demo，也不要改掉原图片。",
       "expected_output": "检查 storyboard 与批准门禁，为 wan22_kaggle 生成单个 Demo 批量任务包；缓存键覆盖模型版本、源图、motion prompt、seed 与推理参数；说明 Kaggle 实测限制。导入成功结果时保留项目镜头的图片 fallback，失败、缺失或损坏的输出继续使用图片运镜。",
       "files": []
+    },
+    {
+      "id": 10,
+      "name": "wan-single-t4-stable-baseline",
+      "prompt": "请按新的 Wan2.2 TI2V-5B + Kaggle 稳定方案准备这个生成式视频任务。先给出 smoke/standard/hd profile 和 preflight 门禁；第一阶段只使用单个 Worker、单张 T4、Diffusers、INT8/FP16 与离线固定依赖，不要启用 torchrun、world_size=2、FSDP 或第二张 GPU。",
+      "expected_output": "明确单卡稳定基线、profile 参数、资源预检和离线依赖要求，并将双卡/FSDP 标记为后续实验，而不是默认路径。",
+      "files": []
+    },
+    {
+      "id": 11,
+      "name": "wan-resume-and-oom-restart",
+      "prompt": "Kaggle 任务有 10 个镜头，前 7 个已完成，第 8 个发生 CUDA OOM。请说明下一步如何恢复，不要让整个任务重跑，也不要在原 Python 进程继续重试。",
+      "expected_output": "跳过已验证 done job；记录 E_GPU_OOM；退出旧 Worker，由 Supervisor 启动干净 Worker，降低 profile 后最多重试一次，并保留每个 job 的 status、metrics、日志和 partial 输出规则。",
+      "files": []
+    },
+    {
+      "id": 12,
+      "name": "wan-offline-path-and-atomic-output",
+      "prompt": "请审查这份 Kaggle Wan 配置：它没有显式 model_path/runtime_path，每次启动 pip install 最新 diffusers，模型输出直接写成 scene_003.mp4。请按生产稳定性要求指出问题并给出契约级修改。",
+      "expected_output": "指出路径必须显式且固定版本；禁止启动时访问 PyPI；要求 preflight.json、requirements.lock、.partial 原子提交、ffprobe 验证以及 E_MODEL/E_DEPENDENCY/E_EXPORT 等机器可识别错误。",
+      "files": []
+    },
+    {
+      "id": 13,
+      "name": "wan-fallback-keeps-full-film",
+      "prompt": "其中两个镜头需要 Wan 动作生成，但其中一个连续两次失败。请设计 narrated-video 的处理结果，确保 Demo 和最终全片仍能交付，并且不改变已批准的原图片和运镜。",
+      "expected_output": "失败镜头保留失败记录并回退到批准的 image_motion 或本地视频；成功镜头可使用有效 MP4；生成结果不覆盖 fallback，整片继续渲染并报告降级。",
+      "files": []
     }
   ]
 }

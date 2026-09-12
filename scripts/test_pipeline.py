@@ -120,7 +120,9 @@ def main():
     tone(root / 'music.wav', 1.5, 110)
     write_json(root / 'storyboard.json', storyboard_for(c['shots']))
     write_json(project_file, c)
-    p = lambda: Project(project_file, args.ffmpeg)
+    def project_instance():
+        return Project(project_file, args.ffmpeg)
+    p = project_instance
     rejected(lambda: p().render('demo'), 'Preflight')
     write_json(preflight_path(project_file), {
         'ok': True,

@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "purpose": "Compare text-to-video and image-to-video providers without changing the narrated-video renderer",
+  "source": "user_supplied_provider_table",
+  "tests": [
+    {
+      "id": "t2v_basic",
+      "mode": "t2v",
+      "duration_seconds": 5,
+      "resolution_target": "provider_default",
+      "seed": 38123,
+      "prompt": "A lone paper boat drifts slowly along a calm river at dawn, cinematic composition, subtle natural motion",
+      "requires_source_image": false,
+      "acceptance": ["video stream decodes", "duration within tolerance", "motion is coherent"]
+    },
+    {
+      "id": "i2v_basic",
+      "mode": "i2v",
+      "duration_seconds": 5,
+      "resolution_target": "provider_default",
+      "seed": 38123,
+      "prompt": "The subject remains consistent while cloth and background atmosphere move gently; slow cinematic push-in",
+      "requires_source_image": true,
+      "acceptance": ["source composition preserved", "identity preserved", "video stream decodes"]
+    },
+    {
+      "id": "i2v_motion",
+      "mode": "i2v",
+      "duration_seconds": 5,
+      "resolution_target": "provider_default",
+      "seed": 59123,
+      "prompt": "Banners flutter naturally, dust drifts slowly, background figures move subtly, preserve identity and costume",
+      "requires_source_image": true,
+      "acceptance": ["motion follows prompt", "no severe flicker", "no identity drift"]
+    },
+    {
+      "id": "fallback_and_cache",
+      "mode": "pipeline",
+      "acceptance": ["invalid output uses approved image fallback", "identical cache key avoids resubmission"]
+    }
+  ],
+  "providers": [
+    {"id": "pixverse", "modes": ["t2v", "i2v"], "priority": 5, "source_note": "user table; credits and resolution are dynamic"},
+    {"id": "pika_2_5", "modes": ["t2v", "i2v"], "priority": 5, "source_note": "user table; credits and resolution are dynamic"},
+    {"id": "runway", "modes": ["t2v", "i2v"], "priority": 3, "source_note": "user table; model availability is dynamic"},
+    {"id": "leonardo_ai", "modes": ["t2v", "i2v"], "priority": 2, "source_note": "user table; I2V upload may require paid access"},
+    {"id": "comfy_cloud", "modes": ["t2v", "i2v"], "priority": 5, "source_note": "user table; credits are dynamic"},
+    {"id": "huggingface_zerogpu", "modes": ["t2v", "i2v"], "priority": 3, "source_note": "user table; depends on Space and queue"},
+    {"id": "wan22_kaggle", "modes": ["i2v"], "planned_modes": ["t2v"], "priority": 5, "source_note": "current Worker first validates dual-GPU I2V"},
+    {"id": "wan22_local", "modes": ["t2v", "i2v"], "priority": 5, "source_note": "user table; local hardware required"},
+    {"id": "cogvideox_colab", "modes": ["i2v"], "priority": 3, "source_note": "existing compatibility provider"},
+    {"id": "ltx_video", "modes": ["t2v", "i2v"], "priority": 4, "source_note": "user table; deployment complexity varies"},
+    {"id": "open_sora_2", "modes": ["t2v"], "priority": 2, "source_note": "user table; research-grade deployment"}
+  ]
+}

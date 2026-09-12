@@ -1,0 +1,25 @@
+{
+  "video_generation": {
+    "enabled": true,
+    "provider": "wan22_kaggle",
+    "execution": "remote_manual",
+    "policy": "selected",
+    "max_scenes": 1,
+    "providers": {
+      "wan22_kaggle": {
+        "engine": "wan_native",
+        "model_revision": "kaggle:ihsannika/wan2-2-ti2v-5b@dataset-9586885",
+        "size": "1280*704",
+        "max_frame_num": 121,
+        "world_size": 2,
+        "ulysses_size": 2,
+        "sample_steps": 20,
+        "offload_model": true,
+        "convert_model_dtype": false,
+        "t5_cpu": false,
+        "t5_fsdp": true,
+        "dit_fsdp": true
+      }
+    }
+  }
+}
