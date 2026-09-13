@@ -1,8 +1,10 @@
 __pycache__/
 *.py[cod]
 .test-output/
+.kaggle_runs/
 .narrated-video/
 deliverables/
+kaggle/svd_smoke_output/
 kaggle/kernel-metadata.json
 .env
 .env.*

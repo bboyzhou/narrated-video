@@ -1,53 +1,40 @@
 # 生成式视频素材
 
-生成式视频是可选的外部素材阶段，不属于最终渲染器。项目仍只声明 `type: image/video`；需要动态生成的分镜使用 `asset_strategy: generated_video`。成功生成的 MP4 在运行时解析成普通 `type: video`，失败、缓存失配或文件损坏时继续使用项目镜头原有的图片/视频素材。
+生成式视频是可选外部素材阶段，不属于最终渲染器。项目镜头仍声明可直接渲染的 `type: image/video` fallback；成功生成的 MP4 在运行时解析成普通视频素材，失败、缓存失配或文件损坏时继续使用已批准 fallback。
 
-当前 provider：
+架构边界、Registry、RuntimePlan 和旧配置迁移规则见 [I2V Provider 架构](i2v-provider-architecture.md)。Provider 对比与试验记录见 [视频 provider 测试矩阵](video-provider-matrix.md)。
 
-- `wan22_kaggle`：Wan2.2 TI2V-5B，Kaggle 官方原生 Worker；稳定基线使用单个 `torchrun` 作业的 FSDP + Ulysses 多 GPU模式，单卡仅作为实验 profile；
-- `cogvideox_colab`：旧 CogVideoX/Colab 工作流的兼容适配器。
+## 配置与分镜
 
-要比较其他文生视频/图生视频玩法，使用 [视频 provider 测试矩阵](video-provider-matrix.md)。矩阵中的额度、价格和免费分辨率是资源快照，不是 pipeline 的运行时依赖；线上平台测试必须由用户选择并确认额度消耗。
-
-不要使用新的 `type: ai_video`，也不要把 Wan、Kaggle 或 CUDA 逻辑写入 FFmpeg 合成器。
-
-## 项目和分镜配置
-
-项目级配置：
+项目分别配置 Provider、通用 Profile 和 Runtime：
 
 ```json
 {
   "video_generation": {
     "enabled": true,
-    "provider": "wan22_kaggle",
-    "execution": "remote_manual",
+    "provider": "skyreels_v2",
+    "profile": "balanced",
+    "runtime": {"type": "kaggle"},
     "policy": "highlights",
-    "max_scenes": 5,
+    "i2v_budget": {
+      "enabled": true,
+      "max_shots": 3,
+      "max_generated_seconds_per_shot": 4
+    },
     "providers": {
-      "wan22_kaggle": {
-        "model_revision": "实际固定的模型或 Kaggle Dataset 版本",
-        "checkpoint_path": "/kaggle/input/wan22-ti2v5b/Wan2.2-TI2V-5B",
-        "source_path": "/kaggle/input/wan22-source",
-        "profile": "native_dual_t4",
-        "size": "1280*704",
-        "max_frame_num": 49,
-        "world_size": 2,
-        "ulysses_size": 2,
-        "t5_fsdp": true,
-        "dit_fsdp": true,
-        "t5_cpu": false,
-        "convert_model_dtype": false,
-        "offload_model": false,
-        "offline": true
+      "skyreels_v2": {
+        "model": "Skywork/SkyReels-V2-I2V-1.3B-540P",
+        "model_revision": "e86231f3882225e5a93eeec740c77bc7f01954ca",
+        "source_revision": "9351d13152207cc04de780e055346b08ade0b851"
       }
     }
   }
 }
 ```
 
-`model_revision` 不能使用 `main/latest`；它必须标识实际挂载的权重版本，否则无法保证缓存安全。`policy` 支持 `none/highlights/selected/all`。`highlights` 只表达创作策略，具体镜头仍必须在已批准分镜中显式标记，脚本不会擅自做语义选择。
+Provider 配置只保存模型/源码/服务版本等元数据。不要在这里填写 dtype、帧数、steps、offload、attention、TeaCache 或 world size。
 
-每个生成镜头先保留可渲染的 fallback：
+每个生成镜头保留可渲染 fallback：
 
 ```json
 {
@@ -56,24 +43,25 @@
   "source_image": "images/S003.png",
   "prompt": "第一帧的主体、服装、地点、构图和光色",
   "negative_prompt": "文字、水印、身份改变、时代错误",
-  "motion_prompt": "Banners move naturally. Dust drifts slowly. Slow cinematic push-in.",
-  "motion_constraints": ["preserve identity", "preserve costume", "preserve composition"],
+  "motion_prompt": "Banners move naturally. Dust drifts slowly.",
+  "motion_constraints": ["preserve identity", "preserve composition"],
   "generation": {
-    "provider": "wan22_kaggle",
+    "provider": "skyreels_v2",
     "mode": "i2v",
-    "duration_target": 5,
-    "seed": 38123
+    "target_duration_sec": 8,
+    "seed": 38123,
+    "motion": {"strength": "high", "camera": "tracking"}
   },
   "type": "image",
   "motion": "push"
 }
 ```
 
-项目 `shots` 中的 `type/asset/motion` 始终表示 fallback。导入器只增加 `generated_video` 结果记录，不覆盖这些字段，因此 storyboard 批准保持有效；Demo 镜头的生成结果改变仍会使 Demo 批准失效。
+`target_duration_sec` 是最终时间线镜头时长，不要求 I2V 一次生成相同时长。Planner 依据 Profile、Provider、Runtime 与 Hardware 决定实际生成长度；Remotion 负责必要的慢放、freeze、push/pan 和转场延展。
 
-## V1：准备任务包
+## 准备任务包
 
-完整分镜批准后，仅准备当前阶段：
+完整分镜批准后仅准备当前阶段：
 
 ```powershell
 python scripts/pipeline.py video-prepare D:/videos/example/project.json `
@@ -81,7 +69,7 @@ python scripts/pipeline.py video-prepare D:/videos/example/project.json `
   --ffmpeg D:/tools/ffmpeg.exe
 ```
 
-也可直接调用底层脚本：
+或调用底层脚本：
 
 ```powershell
 python scripts/prepare_video_jobs.py D:/videos/example/storyboard.json `
@@ -89,94 +77,37 @@ python scripts/prepare_video_jobs.py D:/videos/example/storyboard.json `
   --stage demo
 ```
 
-默认输出 `.narrated-video/video-jobs-demo.json` 和同名 ZIP。一个任务包只含一个 provider；混用 provider 时分别传 `--provider`。任务包格式见 `schemas/video-job.schema.json` 和 `templates/wan_job.json`。
+输出 `.narrated-video/video-jobs-demo.json` 与 ZIP。一个包只含一个 Provider 和一个 RuntimePlan；混用 Provider 时用 `--provider` 分包。任务包必须符合 `schemas/video-job.schema.json`，RuntimePlan 必须符合 `schemas/runtime_plan.schema.json`。
 
-缓存键为以下内容的规范化 SHA-256：provider、模型及固定版本、backend 推理配置、源图内容哈希、motion prompt、约束、seed、帧数与采样参数。缓存命中不会复制源图或重新提交任务；缓存文件内容哈希不符时自动视为 miss。
+Job 只含内容、语义 motion、seed、目标时间线时长与输出路径。底层模型参数只存在于 `runtime_plan.execution`。Worker 启动前调用统一契约校验，并完整打印 Provider、Profile、Runtime、GPU、dtype、尺寸、帧数、fps、steps、attention、TeaCache、offload、生成时长和目标时长。
 
-## Kaggle Worker：官方原生稳定基线
+未知远端硬件会得到 `hardware_basis: unknown_conservative` 的保守计划；任务包内的 `runtime_support/runtime_planner.py` 可供 Runtime launcher 在模型加载前按实际硬件重建 RuntimePlan。重规划不改变内容请求键，执行结果必须记录最终 `runtime_plan_digest`。Worker 只执行最终 RuntimePlan。
 
-`kaggle/run_wan_job.py` 是 native Worker 的作业入口：读取显式任务配置、执行环境检查并启动一个 `torchrun` 作业。每个 rank 参与同一份 `WanTI2V` 模型并行推理，不是多个独立生成 Worker。Worker 在同一次模型加载中顺序处理 job。
+## Provider 与 Runtime 注意事项
 
-输入路径优先级必须是：任务 JSON 显式路径 → 环境变量 → 失败。不要用 `INPUT.rglob()` 猜测模型或源码路径；这样可避免同时挂载多个 Dataset 时误选。
+- `skyreels_v2`：支持文字动作约束；Provider Planner 可按显存与 BF16 能力决定 dtype、offload、TeaCache、帧数与 steps。已验证的 Kaggle 脚本仍位于 `kaggle/skyreels_v2/`，但 Kaggle 不是 Provider 名的一部分。
+- `svd_xt`：不按文字提示词控制动作；`motion_prompt` 保留创作意图，实际运动由 Planner 生成的 `motion_bucket_id` 与 `noise_aug_strength` 控制。Temporal VAE 不支持 slicing，使用小块解码控制显存。
+- `wan22`：TI2V-5B 对显存要求较高；资源未知或受限时 Planner 只给保守 smoke 计划。`convert_model_dtype` 不等于 INT8。FSDP/Ulysses 仅能由支持它们的 RuntimePlan 开启。
+- `cogvideox`：受限显存可规划 INT8 weight-only 与 sequential offload；资源充足时可使用 BF16/无量化计划。
+- `cloud_i2v`：通过 `cloud_api` Runtime 接入；Job Schema 不因服务商变化。
 
-稳定基线要求：
+Kaggle、Colab、RunPod、Local 只是 Runtime。启动时必须核对实际 GPU，不能只相信平台元数据；双 GPU 不能被当作合并显存。不得动态使用 `main/latest` 权重，正式离线运行不得临时访问 PyPI 或下载模型。
 
-1. 解压后的 `video_jobs.json` 和 `input/`；
-2. Wan2.2 官方源码目录；
-3. Wan2.2-TI2V-5B 权重目录。
+## 结果与回退
 
-当前固定组合：
-
-- 官方源码仓库 `Wan-Video/Wan2.2`，commit `42bf4cfaa384bc21833865abc2f9e6c0e67233dc`，随 Kernel 代码目录提交到 `kaggle/wan22_source/`；
-- 权重 Dataset `ihsannika/wan2-2-ti2v-5b`，目录名 `Wan2.2-TI2V-5B`，通过 `kernel-metadata.json` 的 `dataset_sources` 挂载；
-- 权重目录结构必须包含 `Wan2.2_VAE.pth`、三段 `diffusion_pytorch_model-*.safetensors`、index JSON 和 `models_t5_umt5-xxl-enc-bf16.pth`。Worker 会在启动时拒绝缺失目录或文件。
-
-这样源码版本与权重来源可审计，权重不被复制进 Kernel 包，也不会在运行时自动联网下载。
-
-复制 `kaggle/kernel-metadata.example.json` 为 `kernel-metadata.json`，填写自己的 Kaggle 用户名和输入源；首轮使用与 `world_size` 一致的 GPU 数量，并确认 Kaggle Internet 关闭时仍能运行。
-
-不要为每个镜头启动一次 `generate.py`，也不要启动多个独立完整模型 Worker。`torchrun`、`world_size` 和 Ulysses 只表示一个 native 多 GPU 作业的 rank 数；每个 rank 只构造一次 `WanTI2V`，顺序处理任务。单卡 profile 必须显式关闭 FSDP/Ulysses，并不能使用 `t5_cpu + t5_fsdp` 的冲突组合。
-
-启动模型前写入 `/kaggle/working/preflight.json`，至少记录 Python/PyTorch/CUDA、GPU 型号与空闲 VRAM、系统 RAM、磁盘空间、模型目录、输入图片和 FFmpeg。资源不足时主动停止：可用 RAM 小于 8GB、磁盘小于 15GB 时禁止正式运行；RAM 超过 93% 或 VRAM 超过 92% 时终止当前 job 并交由 Supervisor 处理。
-
-默认 profile：`native_smoke` 使用约 832×480、17 帧、8–10 steps；`native_dual_t4` 使用 480P area、49 帧、18–24 steps、`world_size=2`、`ulysses_size=2`；`native_hd` 仅在 standard 连续稳定后启用。官方 native 路径没有 Q8/INT8 参数；`convert_model_dtype` 只表示 dtype 转换，不得写成量化。
-
-输出先写 `<output>.mp4.partial`，生成和 FFmpeg/ffprobe 验证通过后用原子替换提交。验证至少包含视频流存在、duration > 0、可识别 codec 和 frame count > 0。
-
-Worker 不访问 PyPI、不动态安装依赖、不下载模型。依赖放在固定 Kaggle Dataset 的 wheels 和 `requirements.lock` 中，使用 `pip --no-index --find-links=...` 或已验证的基础环境。模型、源码和 runtime 版本都写入 preflight 与任务结果。
-
-每个 job 独立写 `status.json`、`metrics.json`、`worker.log` 和输出文件；状态至少为 `pending/running/done/failed/retrying`。重启时跳过已验证的 `done`，只继续未完成 job。Job 完成后清理临时 tensor、`gc.collect()` 和 `torch.cuda.empty_cache()`；清理用于降低缓存残留，不是 OOM 的根本修复。
-
-错误统一为 `E_CONFIG`、`E_INPUT`、`E_MODEL`、`E_DEPENDENCY`、`E_RAM_PRESSURE`、`E_GPU_OOM`、`E_SIGKILL`、`E_GENERATION`、`E_EXPORT`。若 return code 为 `-9`，记录 `E_SIGKILL` 和疑似系统 OOM，不只暴露 `CalledProcessError`。
-
-发生 `E_GPU_OOM`、`E_RAM_PRESSURE` 或 `E_SIGKILL` 时，native 作业必须退出并记录原因；外层 Supervisor（尚未由当前入口实现）再降低 profile 并创建干净作业，每个 job 最多自动重试一次。禁止在已发生 CUDA OOM 的进程内继续重试。
-
-## 导入、状态和 fallback
-
-下载 Kaggle 输出后：
+外部 Runtime 输出 MP4 和 `results.json` 后导入：
 
 ```powershell
 python scripts/pipeline.py video-import D:/videos/example/project.json `
   --stage demo `
-  --jobs D:/videos/example/.narrated-video/video-jobs-demo.json `
-  --results D:/downloads/wan-output.zip `
-  --ffmpeg D:/tools/ffmpeg.exe
-
-python scripts/pipeline.py video-status D:/videos/example/project.json `
-  --stage demo `
+  --results D:/downloads/results.zip `
   --ffmpeg D:/tools/ffmpeg.exe
 ```
 
-导入器使用 `ffprobe`；找不到时直接用所选 FFmpeg 解码首帧并读取流信息。它检查 shot ID、缓存键、MP4 视频流、分辨率、时长和输出哈希。有效文件保存到：
+导入器核对 Job cache key、RuntimePlan、输出哈希、分辨率、生成时长与完整解码。成功后只增加 `generated_video` 记录，不覆盖 `type/asset/motion` fallback。失败记录到导入报告，并按“已批准本地视频 → 已批准图片运镜/Remotion”降级。
 
-```text
-assets/generated-video/<provider>/<cache_key>/<shot_id>.mp4
-```
+统一错误至少覆盖 `E_I2V_TIMEOUT`、`E_PROVIDER_FAILURE`、`E_RUNTIME_FAILURE`、`E_GPU_UNSUPPORTED`、`E_GPU_OOM`、`E_SIGKILL`、`E_GENERATION` 和 `E_EXPORT`。任何单镜头失败都不得阻塞最终 narrated-video。
 
-索引和最近报告分别写入：
+## 验证
 
-```text
-.narrated-video/generated-video-index.json
-.narrated-video/generated-video-import.json
-```
-
-`results.json` 标记失败、输出缺失、当前缓存键不匹配或文件损坏时，镜头状态为 `fallback`，继续使用已批准的项目 `asset + motion`，不阻塞整片。未审阅的生成结果不能静默进入全片；导入 Demo 后先渲染、抽帧和观看，再记录 Demo 批准。
-
-## 审批顺序
-
-口播批准 → 完整 storyboard 批准 → Demo 静态源图 → `video-prepare --stage demo` → Kaggle 生成 → `video-import --stage demo` → 渲染和确认 Demo → 准备/导入其余镜头 → 渲染全片。
-
-每个结果记录 provider、模型/版本、seed、源图哈希、motion prompt、生成参数、输出哈希和使用条件。除非已核对实际模型与素材条款，不声称生成结果可商用。
-
-## Diffusers 与后续边界
-
-当前不把 Diffusers 作为本次修复目标。官方仓库的 native `WanTI2V` 与独立的 `Wan2.2-TI2V-5B-Diffusers` 模型是两套加载契约；切换 Diffusers 时必须另建 Worker、锁定独立模型版本并重新验证显存。Kaggle CLI 自动提交也必须在 native 手动流程通过后再增加。
-
-## 生产验收
-
-- native smoke 连续 10 次无 SIGKILL、CUDA OOM 或 Kernel restart；
-- 同一 Worker 连续完成 3 个镜头；
-- 模拟中断后只恢复未完成 job；
-- Internet=OFF 时完整运行；
-- HD OOM 后 Worker 退出、Supervisor 降级到 standard 并重试；
-- Wan 镜头失败两次后，项目仍使用图片运镜并输出完整 MP4。
+运行 `scripts/test_generated_video.py` 验证 Profile 去硬件化、别名迁移、硬件自适应 RuntimePlan、Job 禁止底层参数、任务包、Worker 契约、Hero Shot Budget 和 Remotion fallback。远端 Worker 还需各自在目标 Runtime 做 smoke；本地单元测试不证明模型、显存或平台额度可用。

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openai.local/narrated-video/runtime-plan.schema.json",
+  "title": "narrated-video generated I2V RuntimePlan",
+  "type": "object",
+  "required": ["provider", "runtime", "profile", "execution", "generated_duration_sec", "hardware", "hardware_basis", "timeout", "plan_digest"],
+  "properties": {
+    "provider": {"type": "string", "minLength": 1},
+    "runtime": {"type": "string", "minLength": 1},
+    "profile": {"enum": ["smoke", "fast", "balanced", "quality", "max_quality"]},
+    "execution": {
+      "type": "object",
+      "required": ["dtype", "resolution", "frame_num", "fps", "world_size"],
+      "properties": {
+        "dtype": {"enum": ["float16", "bfloat16", "float32", "managed"]},
+        "resolution": {"type": "string", "pattern": "^[0-9]+x[0-9]+$"},
+        "frame_num": {"type": "integer", "minimum": 1},
+        "fps": {"type": "number", "exclusiveMinimum": 0},
+        "world_size": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": true
+    },
+    "generated_duration_sec": {"type": "number", "exclusiveMinimum": 0},
+    "hardware": {"type": "object"},
+    "hardware_basis": {"enum": ["detected", "unknown_conservative"]},
+    "timeout": {"type": "object", "required": ["expected_runtime_sec", "soft_timeout_sec", "hard_timeout_sec"]},
+    "plan_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openai.local/narrated-video/provider-capability.schema.json",
+  "title": "narrated-video I2V provider capabilities",
+  "type": "object",
+  "required": ["supports_i2v", "supports_t2v", "supports_multi_gpu", "supports_fp16", "supports_bf16", "supports_teacache", "supports_ret_steps", "supports_offload"],
+  "properties": {
+    "supports_i2v": {"type": "boolean"}, "supports_t2v": {"type": "boolean"},
+    "supports_multi_gpu": {"type": "boolean"}, "supports_fp16": {"type": "boolean"},
+    "supports_bf16": {"type": "boolean"}, "supports_teacache": {"type": "boolean"},
+    "supports_ret_steps": {"type": "boolean"}, "supports_offload": {"type": "boolean"},
+    "recommended_max_generated_seconds": {"type": "number", "exclusiveMinimum": 0}
+  },
+  "additionalProperties": false
+}

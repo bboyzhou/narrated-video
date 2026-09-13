@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "title": "skyreels_v2_pelican_demo",
+  "storyboard": "storyboard.json",
+  "shots": [
+    {
+      "id": "S001",
+      "type": "image",
+      "asset": "../cogvideox_demo/input/S001.png",
+      "motion": "push",
+      "generated_video": {
+        "provider": "skyreels_v2",
+        "cache_key": "146c05c9e6e26e6954a0215fe937ea49f6d7b6e80c61bccf7a84882369ad78da",
+        "asset": "assets/generated-video/skyreels_v2_kaggle/146c05c9e6e26e6954a0215fe937ea49f6d7b6e80c61bccf7a84882369ad78da/S001.mp4",
+        "sha256": "670d0ff8029696cf03813af40e00a3286bcba1f68874fa3de7f69d9f72b05e6f",
+        "model": "Skywork/SkyReels-V2-I2V-1.3B-540P",
+        "model_revision": "e86231f3882225e5a93eeec740c77bc7f01954ca",
+        "imported_at": "2026-09-13T17:58:13+0800",
+        "width": 960,
+        "height": 544,
+        "duration": 4.04,
+        "codec": "h264 (High) (avc1 / 0x31637661)"
+      }
+    }
+  ],
+  "video_generation": {
+    "enabled": true,
+    "provider": "skyreels_v2",
+    "profile": "balanced",
+    "runtime": {"type": "kaggle"},
+    "policy": "selected",
+    "i2v_budget": {"enabled": true, "max_shots": 1, "max_generated_seconds_per_shot": 4},
+    "providers": {
+      "skyreels_v2": {
+        "engine": "skyreels_v2_native_i2v",
+        "model": "Skywork/SkyReels-V2-I2V-1.3B-540P",
+        "model_revision": "e86231f3882225e5a93eeec740c77bc7f01954ca",
+        "source_revision": "9351d13152207cc04de780e055346b08ade0b851",
+        "source_sha256": "3571f1f6d2da99a360d879fb6acf91850ce8c1455c8f67d13501a5b0159c77da"
+      }
+    }
+  }
+}

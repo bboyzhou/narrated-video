@@ -92,11 +92,18 @@ def prepare_video_jobs(storyboard_path, project_path=None, stage='demo', output=
         project_root / '.narrated-video' / ('video-jobs-' + stage + '.json'))
     bundle = Path(bundle).resolve() if bundle else output.with_suffix('.zip')
     index = _cache_index(project_root)
-    jobs, hits, backend = [], [], None
+    jobs, hits, provider_config, runtime_plan = [], [], None, None
     with tempfile.TemporaryDirectory(prefix='narrated-video-jobs-') as temporary:
         bundle_root = Path(temporary)
         input_dir = bundle_root / 'input'
         input_dir.mkdir()
+        support_dir = bundle_root / 'runtime_support'
+        script_root = Path(__file__).resolve().parent
+        support_dir.mkdir()
+        shutil.copyfile(script_root / 'runtime_planner.py', support_dir / 'runtime_planner.py')
+        for package in ('generators', 'planners', 'runtimes'):
+            shutil.copytree(script_root / package, support_dir / package,
+                            ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
         for plan in plans:
             shot_id = plan['id']
             source = plan.get('source_image') or project_shots.get(shot_id, {}).get('asset')
@@ -108,10 +115,14 @@ def prepare_video_jobs(storyboard_path, project_path=None, stage='demo', output=
             suffix = source_path.suffix.lower() or '.png'
             archive_image = Path('input') / (shot_id + suffix)
             image_hash = file_sha256(source_path)
-            job, job_backend = build_video_job(
+            job, job_provider_config, job_runtime_plan = build_video_job(
                 plan, archive_image.as_posix(), image_hash, project)
-            backend = backend or job_backend
-            require(backend == job_backend, 'All jobs in a bundle must share one backend configuration')
+            provider_config = provider_config or job_provider_config
+            runtime_plan = runtime_plan or job_runtime_plan
+            require(provider_config == job_provider_config,
+                    'All jobs in a bundle must share one provider configuration')
+            require(runtime_plan == job_runtime_plan,
+                    'All jobs in a bundle must share one RuntimePlan')
             job['fallback_asset'] = project_shots.get(shot_id, {}).get('asset')
             hit = _cache_hit(index.get(job['cache_key']), project_root,
                              selected_provider, job['cache_key'])
@@ -122,12 +133,15 @@ def prepare_video_jobs(storyboard_path, project_path=None, stage='demo', output=
             jobs.append(job)
 
         payload = {
-            'version': 2,
+            'version': 3,
             'project_id': project.get('title') or project_root.name,
             'provider': selected_provider,
+            'profile': runtime_plan['profile'],
+            'runtime': {'type': runtime_plan['runtime']},
             'mode': 'i2v',
             'stage': stage,
-            'backend': backend,
+            'provider_config': provider_config,
+            'runtime_plan': runtime_plan,
             'jobs': jobs,
             'cache_hits': hits,
         }
@@ -136,6 +150,9 @@ def prepare_video_jobs(storyboard_path, project_path=None, stage='demo', output=
         with zipfile.ZipFile(bundle, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
             archive.write(output, 'video_jobs.json')
             for path in input_dir.rglob('*'):
+                if path.is_file():
+                    archive.write(path, path.relative_to(bundle_root).as_posix())
+            for path in support_dir.rglob('*'):
                 if path.is_file():
                     archive.write(path, path.relative_to(bundle_root).as_posix())
     return {'provider': selected_provider, 'jobs': len(jobs), 'cache_hits': len(hits),

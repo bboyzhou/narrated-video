@@ -67,26 +67,16 @@ preflight 未通过或因运行环境/配音配置变化而失效时，`check`�
   "motion": {"easing": "smoothstep", "max_zoom": 0.06},
   "video_generation": {
     "enabled": true,
-    "provider": "wan22_kaggle",
-    "execution": "remote_manual",
+    "provider": "skyreels_v2",
+    "profile": "balanced",
+    "runtime": {"type": "kaggle"},
     "policy": "highlights",
-    "max_scenes": 5,
+    "i2v_budget": {"enabled": true, "max_shots": 3, "max_generated_seconds_per_shot": 4},
     "providers": {
-      "wan22_kaggle": {
-        "model_revision": "实际固定的模型或 Kaggle Dataset 版本",
-        "checkpoint_path": "/kaggle/input/wan22-ti2v5b/Wan2.2-TI2V-5B",
-        "source_path": "/kaggle/input/wan22-source",
-        "profile": "native_dual_t4",
-        "size": "1280*704",
-        "max_frame_num": 49,
-        "world_size": 2,
-        "ulysses_size": 2,
-        "t5_fsdp": true,
-        "dit_fsdp": true,
-        "t5_cpu": false,
-        "convert_model_dtype": false,
-        "offload_model": false,
-        "offline": true
+      "skyreels_v2": {
+        "model": "Skywork/SkyReels-V2-I2V-1.3B-540P",
+        "model_revision": "e86231f3882225e5a93eeec740c77bc7f01954ca",
+        "source_revision": "9351d13152207cc04de780e055346b08ade0b851"
       }
     }
   },

@@ -1,0 +1,25 @@
+{
+  "version": 3,
+  "project_id": "replace-me",
+  "provider": "skyreels_v2",
+  "profile": "balanced",
+  "runtime": {"type": "kaggle"},
+  "mode": "i2v",
+  "stage": "demo",
+  "provider_config": {
+    "engine": "skyreels_v2_native_i2v",
+    "model": "Skywork/SkyReels-V2-I2V-1.3B-540P",
+    "model_revision": "e86231f3882225e5a93eeec740c77bc7f01954ca"
+  },
+  "runtime_plan": "GENERATED_BY_PROVIDER_PLANNER",
+  "jobs": [{
+    "id": "S001", "image": "input/S001.png",
+    "source_image_sha256": "REPLACE_WITH_SHA256",
+    "prompt": "Cavalry charges forward.", "negative_prompt": "distortion",
+    "constraints": ["preserve identity", "preserve composition"],
+    "motion": {"strength": "high", "camera": "tracking"},
+    "seed": 123456, "target_duration_sec": 8,
+    "cache_key": "GENERATED_BY_PREPARE", "output": "output/S001.mp4"
+  }],
+  "cache_hits": []
+}

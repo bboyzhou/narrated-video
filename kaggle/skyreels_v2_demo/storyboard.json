@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "shots": [
+    {
+      "id": "S001",
+      "asset_strategy": "generated_video",
+      "source_image": "../cogvideox_demo/input/S001.png",
+      "motion_prompt": "A cheerful white pelican naturally rides and pedals the blue bicycle forward from left to right along the sunny seaside promenade. Both bicycle wheels rotate smoothly, the pelican's legs pedal continuously, its body balances gently, and its feathers and the nearby palm leaves move subtly in the sea breeze. The camera tracks alongside at a steady pace. Bright cinematic daylight, coherent natural motion.",
+      "negative_prompt": "distorted bicycle, extra legs, extra wings, fused limbs, deformed beak, identity change, stationary wheels, backward motion, camera shake, flicker, text, logo, watermark",
+      "motion_constraints": [
+        "preserve the same white pelican identity and orange beak",
+        "preserve the blue bicycle geometry and two wheels",
+        "preserve the sunny seaside promenade composition",
+        "continuous forward pedaling with smooth wheel rotation",
+        "no text, logo, or watermark"
+      ],
+      "generation": {
+        "provider": "skyreels_v2",
+        "mode": "i2v",
+        "target_duration_sec": 4.0,
+        "seed": 38123
+      }
+    }
+  ],
+  "demo": {
+    "shots": ["S001"],
+    "selection_reason": "Validate prompt-controlled pelican cycling with SkyReels-V2 I2V 1.3B on one Kaggle T4",
+    "validation_goals": [
+      "actual Tesla T4",
+      "97-frame 960x544 MP4 at 24 fps (about 4 seconds)",
+      "pelican pedals and bicycle wheels rotate",
+      "pelican and bicycle remain recognizable",
+      "no severe flicker or geometry collapse"
+    ]
+  }
+}

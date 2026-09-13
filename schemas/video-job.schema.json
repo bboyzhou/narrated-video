@@ -1,62 +1,53 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://openai.local/narrated-video/video-job.schema.json",
-  "title": "narrated-video generated video job",
+  "title": "narrated-video content-only I2V jobs v3",
   "type": "object",
-  "required": ["version", "project_id", "provider", "mode", "stage", "backend", "jobs", "cache_hits"],
+  "required": ["version", "project_id", "provider", "profile", "runtime", "mode", "stage", "provider_config", "runtime_plan", "jobs", "cache_hits"],
   "properties": {
-    "version": {"const": 2},
+    "version": {"const": 3},
     "project_id": {"type": "string", "minLength": 1},
-    "provider": {"type": "string", "minLength": 1},
+    "provider": {"enum": ["skyreels_v2", "wan22", "cogvideox", "svd_xt", "cloud_i2v"]},
+    "profile": {"enum": ["smoke", "fast", "balanced", "quality", "max_quality"]},
+    "runtime": {"type": "object", "required": ["type"], "properties": {"type": {"enum": ["local", "kaggle", "colab", "runpod", "remote_worker", "cloud_api"]}}, "additionalProperties": false},
     "mode": {"const": "i2v"},
     "stage": {"enum": ["demo", "full"]},
-    "backend": {
-      "type": "object",
-      "required": ["engine", "model", "model_revision", "profile", "task", "size", "world_size", "ulysses_size", "t5_fsdp", "dit_fsdp", "offline"],
-      "properties": {
-        "engine": {"const": "wan_native"},
-        "model": {"const": "Wan-AI/Wan2.2-TI2V-5B"},
-        "model_revision": {"type": "string", "minLength": 1, "not": {"enum": ["main", "latest"]}},
-        "checkpoint_path": {"type": "string", "minLength": 1},
-        "source_path": {"type": "string", "minLength": 1},
-        "profile": {"enum": ["native_smoke", "native_dual_t4", "native_hd"]},
-        "task": {"const": "ti2v-5B"},
-        "size": {"enum": ["1280*704", "704*1280"]},
-        "world_size": {"type": "integer", "minimum": 1},
-        "ulysses_size": {"type": "integer", "minimum": 1},
-        "t5_fsdp": {"type": "boolean"},
-        "dit_fsdp": {"type": "boolean"},
-        "t5_cpu": {"type": "boolean"},
-        "convert_model_dtype": {"type": "boolean"},
-        "offload_model": {"type": "boolean"},
-        "offline": {"type": "boolean"}
-      },
-      "additionalProperties": true
-    },
+    "provider_config": {"type": "object", "required": ["model", "model_revision"], "not": {"anyOf": [
+      {"required": ["frame_num"]}, {"required": ["inference_steps"]}, {"required": ["dtype"]},
+      {"required": ["world_size"]}, {"required": ["offload"]}, {"required": ["attention_backend"]},
+      {"required": ["profile"]}, {"required": ["runtime"]}, {"required": ["fps"]},
+      {"required": ["resolution"]}, {"required": ["offline"]}, {"required": ["bootstrap_packages"]}
+    ]}},
+    "runtime_plan": {"$ref": "runtime_plan.schema.json"},
     "jobs": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "image", "source_image_sha256", "prompt", "constraints", "provider", "mode", "seed", "duration_target", "cache_key", "output"],
+        "required": ["id", "image", "source_image_sha256", "prompt", "constraints", "seed", "target_duration_sec", "cache_key", "output"],
         "properties": {
           "id": {"type": "string", "pattern": "^[A-Za-z0-9_-]+$"},
-          "image": {"type": "string"},
+          "image": {"type": "string", "minLength": 1},
           "source_image_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
           "prompt": {"type": "string", "minLength": 1},
           "negative_prompt": {"type": "string"},
           "constraints": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
-          "provider": {"type": "string"},
-          "mode": {"const": "i2v"},
+          "motion": {"type": "object", "additionalProperties": true},
           "seed": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-          "duration_target": {"type": "number", "minimum": 1, "maximum": 30},
+          "target_duration_sec": {"type": "number", "minimum": 1, "maximum": 30},
           "cache_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-          "output": {"type": "string"}
+          "output": {"type": "string", "minLength": 1},
+          "fallback_asset": {"type": ["string", "null"]}
         },
-        "additionalProperties": true
+        "not": {"anyOf": [
+          {"required": ["provider"]}, {"required": ["runtime"]}, {"required": ["profile"]},
+          {"required": ["frame_num"]}, {"required": ["inference_steps"]}, {"required": ["steps"]},
+          {"required": ["dtype"]}, {"required": ["offload"]}, {"required": ["world_size"]},
+          {"required": ["attention_backend"]}, {"required": ["teacache"]}
+        ]},
+        "additionalProperties": false
       }
     },
     "cache_hits": {"type": "array"}
   },
   "additionalProperties": false
 }
-

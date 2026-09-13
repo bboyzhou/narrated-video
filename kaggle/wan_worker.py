@@ -50,6 +50,47 @@ def verify_video(path, ffprobe='ffprobe'):
     return report
 
 
+def validate_backend(backend):
+    require(backend.get('engine') == 'wan_native',
+            'E_CONFIG: Wan2.2 worker requires engine=wan_native')
+    require(backend.get('model') == 'Wan-AI/Wan2.2-TI2V-5B',
+            'E_CONFIG: unsupported Wan2.2 model')
+    revision = backend.get('model_revision')
+    require(isinstance(revision, str) and revision.strip() and
+            revision not in ('main', 'latest'),
+            'E_CONFIG: Wan2.2 worker requires a pinned model_revision')
+    require(backend.get('task') == 'ti2v-5B', 'Only Wan2.2 TI2V-5B is supported')
+    generation = backend.get('generation') or {}
+    device = backend.get('device') or {}
+    acceleration = backend.get('acceleration') or {}
+    require(backend.get('profile') in ('smoke', 'fast', 'balanced', 'quality', 'max_quality'),
+            'Unsupported generic Profile')
+    require(generation.get('size') in ('1280*704', '704*1280') and
+            generation.get('fps') == 24 and isinstance(generation.get('frame_num'), int),
+            'Wan2.2 RuntimePlan output is invalid')
+    require(device.get('world_size') == 1,
+            'Wan2.2 RuntimePlan currently requires world_size=1')
+    return generation, device, acceleration
+
+
+def backend_from_manifest(payload):
+    if 'runtime_plan' not in payload:
+        raise RuntimeError('E_CONFIG: RuntimePlan is required')
+    plan = payload.get('runtime_plan') or {}
+    execution = dict(plan.get('execution') or {})
+    if 'resolution' in execution:
+        execution['size'] = execution.pop('resolution').replace('x', '*')
+    device = {'world_size': execution.pop('world_size', 1),
+              'compute_dtype': execution.pop('dtype', None)}
+    generation_keys = {'size', 'fps', 'frame_num', 'sample_steps', 'sample_shift',
+                       'sample_solver', 'sample_guide_scale'}
+    generation = {key: execution.pop(key) for key in list(execution)
+                  if key in generation_keys}
+    return {**(payload.get('provider_config') or {}), '_runtime_plan': True,
+            'profile': plan.get('profile'), 'device': device,
+            'generation': generation, 'acceleration': execution}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--jobs', required=True)
@@ -61,16 +102,16 @@ def main():
     job_path = Path(args.jobs).resolve()
     root = job_path.parent
     payload = json.loads(job_path.read_text(encoding='utf-8-sig'))
-    backend = payload.get('backend', {})
-    require(payload.get('version') == 2 and payload.get('provider') == 'wan22_kaggle',
-            'Expected a version 2 wan22_kaggle job manifest')
-    require(backend.get('task') == 'ti2v-5B', 'Only Wan2.2 TI2V-5B is supported')
-    world_size_config = int(backend.get('world_size', 1))
-    ulysses_size = int(backend.get('ulysses_size', 1))
-    t5_fsdp = bool(backend.get('t5_fsdp', False))
-    dit_fsdp = bool(backend.get('dit_fsdp', False))
-    t5_cpu = bool(backend.get('t5_cpu', False))
-    convert_model_dtype = bool(backend.get('convert_model_dtype', False))
+    backend = backend_from_manifest(payload)
+    require(payload.get('version') == 3 and payload.get('provider') == 'wan22',
+            'Expected a version 3 wan22 job manifest')
+    generation, device, acceleration = validate_backend(backend)
+    world_size_config = int(device.get('world_size', 1))
+    ulysses_size = int(acceleration.get('ulysses_size', 1))
+    t5_fsdp = bool(acceleration.get('t5_fsdp', False))
+    dit_fsdp = bool(acceleration.get('dit_fsdp', False))
+    t5_cpu = bool(acceleration.get('t5_cpu', False))
+    convert_model_dtype = bool(acceleration.get('convert_model_dtype', False))
     require(world_size_config == 1 or ulysses_size == world_size_config,
             'ulysses_size must equal world_size for native distributed inference')
     require(not t5_cpu or not t5_fsdp,
@@ -109,7 +150,8 @@ def main():
     require(torch.cuda.device_count() >= world_size,
             f'Requested {world_size} GPUs are unavailable')
     torch.cuda.set_device(local_rank)
-    dist.init_process_group('nccl', init_method='env://', rank=rank, world_size=world_size)
+    if world_size > 1:
+        dist.init_process_group('nccl', init_method='env://', rank=rank, world_size=world_size)
 
     # Wan's sequence-parallel helper is initialized by the official generate.py.
     if ulysses_size > 1:
@@ -139,6 +181,15 @@ def main():
     try:
         for job in payload.get('jobs', []):
             active_job = job
+            forbidden = sorted(set(job).intersection({
+                'provider', 'profile', 'runtime', 'dtype', 'offload',
+                'world_size', 'attention_backend', 'teacache',
+                'frame_num', 'output_fps', 'sample_steps', 'sample_shift',
+                'sample_solver', 'sample_guide_scale',
+            }))
+            require(not forbidden,
+                    'E_CONFIG: job performance parameters are forbidden: ' +
+                    ', '.join(forbidden))
             output = output_root / job['output']
             if job['id'] in completed_ids and output.is_file():
                 try:
@@ -158,31 +209,34 @@ def main():
                 prompt,
                 img=image,
                 n_prompt=job.get('negative_prompt', ''),
-                size=SIZE_CONFIGS[backend['size']],
-                max_area=MAX_AREA_CONFIGS[backend['size']],
-                frame_num=int(job['frame_num']),
-                shift=float(job['sample_shift']),
-                sample_solver=job['sample_solver'],
-                sampling_steps=int(job['sample_steps']),
-                guide_scale=float(job['sample_guide_scale']),
+                size=SIZE_CONFIGS[generation['size']],
+                max_area=MAX_AREA_CONFIGS[generation['size']],
+                frame_num=int(generation['frame_num']),
+                shift=float(generation['sample_shift']),
+                sample_solver=generation['sample_solver'],
+                sampling_steps=int(generation['sample_steps']),
+                guide_scale=float(generation['sample_guide_scale']),
                 seed=int(job['seed']),
-                offload_model=bool(backend.get('offload_model', False)),
+                offload_model=bool(acceleration['offload_model']),
             )
             if rank == 0:
                 output.parent.mkdir(parents=True, exist_ok=True)
-                partial = output.with_suffix(output.suffix + '.partial')
+                partial = output.with_name(output.stem + '.partial' + output.suffix)
                 save_video(tensor=video[None], save_file=str(partial),
-                           fps=int(job['output_fps']), nrow=1,
+                           fps=int(generation['fps']), nrow=1,
                            normalize=True, value_range=(-1, 1))
+                require(partial.is_file(), 'E_EXPORT: save_video did not create output')
                 verify_video(partial)
                 partial.replace(output)
                 results.append({'id': job['id'], 'status': 'completed',
                                 'cache_key': job['cache_key'],
                                 'output': job['output'], 'sha256': sha256(output),
-                                'frame_num': job['frame_num'],
-                                'fps': job['output_fps']})
+                                'frame_num': generation['frame_num'],
+                                'fps': generation['fps'],
+                                'generated_duration_sec': generation['frame_num'] / generation['fps']})
                 write_json(output_root / 'results.json', {
-                    'version': 2, 'provider': 'wan22_kaggle',
+                    'version': 3, 'provider': 'wan22',
+                    'runtime_plan_digest': (payload.get('runtime_plan') or {}).get('plan_digest'),
                     'model': backend.get('model'),
                     'model_revision': backend.get('model_revision'),
                     'updated_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
@@ -193,7 +247,8 @@ def main():
             gc.collect()
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
-            dist.barrier()
+            if world_size > 1:
+                dist.barrier()
     except Exception as error:
         if rank == 0:
             error_text = str(error)
@@ -209,7 +264,8 @@ def main():
                             'status': 'failed', 'code': error_code,
                             'error': error_text})
             write_json(output_root / 'results.json', {
-                'version': 2, 'provider': 'wan22_kaggle',
+                'version': 3, 'provider': 'wan22',
+                'runtime_plan_digest': (payload.get('runtime_plan') or {}).get('plan_digest'),
                 'model': backend.get('model'),
                 'model_revision': backend.get('model_revision'),
                 'updated_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),

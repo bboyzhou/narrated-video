@@ -51,10 +51,12 @@ python $pipeline record $project --stage storyboard --quote '用户实际批准�
   "motion_prompt": "The general remains standing while his robe and banners move gently in the wind. Slow cinematic push-in.",
   "motion_constraints": ["preserve character identity", "preserve costume", "preserve composition"],
   "generation": {
-    "provider": "wan22_kaggle",
+    "provider": "skyreels_v2",
     "mode": "i2v",
-    "duration_target": 5,
-    "seed": 42
+    "target_duration_sec": 8,
+    "seed": 42,
+    "motion_bucket_id": 80,
+    "noise_aug_strength": 0.02
   }
 }
 ```

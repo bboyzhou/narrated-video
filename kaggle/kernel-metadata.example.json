@@ -6,7 +6,7 @@
   "kernel_type": "script",
   "is_private": true,
   "enable_gpu": true,
-  "machine_shape": "NvidiaTeslaT4",
+  "machine_shape": "NvidiaL4X1",
   "enable_internet": false,
   "dataset_sources": [],
   "competition_sources": [],

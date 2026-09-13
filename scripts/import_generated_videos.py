@@ -12,6 +12,15 @@ import zipfile
 from pathlib import Path
 
 from generators import build_video_job, file_sha256
+from generators.router import fallback_result
+
+
+LEGACY_PERFORMANCE_FIELDS = {
+    'frame_num', 'output_fps', 'fps', 'size', 'inference_steps',
+    'guidance_scale', 'shift', 'sample_steps', 'sample_shift',
+    'sample_solver', 'sample_guide_scale', 'decode_chunk_size',
+    'motion_bucket_id', 'noise_aug_strength', 'duration_target',
+}
 
 
 def require(condition, message):
@@ -122,10 +131,13 @@ def _result_rows(root):
 
 
 def _upgrade_legacy_manifest(manifest, config, project_root):
-    """Add deterministic cache keys to version 1 CogVideoX manifests."""
-    jobs = manifest.get('jobs', [])
-    if all(job.get('cache_key') for job in jobs):
+    """Normalize legacy manifests into the v3 content-only job contract."""
+    if (manifest.get('version') == 3 and isinstance(manifest.get('runtime_plan'), dict) and
+            isinstance(manifest.get('provider_config'), dict) and all(
+                not set(job).intersection(LEGACY_PERFORMANCE_FIELDS | {'provider', 'profile', 'runtime'})
+                for job in manifest.get('jobs', []))):
         return manifest
+    jobs = manifest.get('jobs', [])
     storyboard_value = config.get('storyboard')
     require(storyboard_value, 'Legacy video_jobs.json needs project.storyboard for migration')
     storyboard_path = Path(storyboard_value)
@@ -134,7 +146,8 @@ def _upgrade_legacy_manifest(manifest, config, project_root):
     require(storyboard_path.is_file(), 'Storyboard missing for legacy video job migration')
     plans = {plan['id']: plan for plan in read_json(storyboard_path).get('shots', [])}
     shots = {shot['id']: shot for shot in config.get('shots', [])}
-    upgraded, backend = [], None
+    upgraded, provider_config, runtime_plan = [], None, None
+    legacy_generation = {}
     for old in jobs:
         shot_id = old.get('id')
         require(shot_id in plans and shot_id in shots,
@@ -145,13 +158,36 @@ def _upgrade_legacy_manifest(manifest, config, project_root):
         if not source_path.is_absolute():
             source_path = (project_root / source_path).resolve()
         require(source_path.is_file(), shot_id + ': source image missing for legacy job migration')
-        current, current_backend = build_video_job(
+        current, current_provider_config, current_runtime_plan = build_video_job(
             plan, old.get('image', 'input/' + shot_id + source_path.suffix.lower()),
             file_sha256(source_path), config)
-        backend = backend or current_backend
-        require(backend == current_backend, 'Legacy jobs do not share one backend configuration')
-        upgraded.append({**old, **current, 'output': old.get('output', current['output'])})
-    return {**manifest, 'version': 2, 'backend': backend, 'jobs': upgraded,
+        provider_config = provider_config or current_provider_config
+        runtime_plan = runtime_plan or current_runtime_plan
+        require(provider_config == current_provider_config,
+                'Legacy jobs do not share one provider configuration')
+        require(runtime_plan == current_runtime_plan,
+                'Legacy jobs do not share one RuntimePlan')
+        legacy_content = {key: value for key, value in old.items()
+                          if key not in LEGACY_PERFORMANCE_FIELDS |
+                          {'provider', 'profile', 'runtime'}}
+        upgraded.append({**legacy_content, **current,
+                         'output': old.get('output', current['output'])})
+        if old.get('frame_num') and old.get('output_fps'):
+            legacy_generation[shot_id] = {
+                'generated_duration_sec': float(old['frame_num']) / float(old['output_fps']),
+                'fps': float(old['output_fps']),
+            }
+        elif old.get('duration_target'):
+            legacy_generation[shot_id] = {
+                'generated_duration_sec': float(old['duration_target']),
+                'fps': float(old.get('output_fps', 24)),
+            }
+    return {**manifest, 'version': 3, '_legacy': True,
+            'provider': runtime_plan['provider'],
+            'profile': runtime_plan['profile'],
+            'runtime': {'type': runtime_plan['runtime']},
+            'provider_config': provider_config, 'runtime_plan': runtime_plan, 'jobs': upgraded,
+            '_legacy_generation': legacy_generation,
             'cache_hits': manifest.get('cache_hits', [])}
 
 
@@ -190,37 +226,50 @@ def import_generated_videos(project_path, results_path, jobs_path=None, ffprobe=
         for job in jobs:
             shot_id = job.get('id')
             require(shot_id in shots, 'Unknown shot ID in generated results: ' + str(shot_id))
-            require(job.get('provider', provider) == provider,
-                    str(shot_id) + ': job provider does not match manifest')
             result_row = reported.get(shot_id)
             if result_row and result_row.get('status') != 'completed':
-                failed.append({'id': shot_id, 'reason': result_row.get('error', 'worker failed')})
+                code = result_row.get('code') or 'E_PROVIDER_FAILURE'
+                failed.append({'id': shot_id, **fallback_result(provider, code),
+                               'error': result_row.get('error', 'worker failed')})
                 continue
             if result_row:
                 require(result_row.get('cache_key') == job.get('cache_key'),
                         shot_id + ': results.json cache_key does not match submitted job')
             source = _find_output(result_root, job)
             if not source:
-                failed.append({'id': shot_id, 'reason': 'output MP4 missing; fallback remains active'})
+                failed.append({'id': shot_id, **fallback_result(provider, 'E_EXPORT'),
+                               'error': 'output MP4 missing'})
                 continue
             try:
                 info = probe(source, ffprobe, ffmpeg)
                 validate_decodable_video(source, ffmpeg)
-                expected_duration = job.get('duration_target')
-                if job.get('frame_num') and job.get('output_fps'):
-                    expected_duration = float(job['frame_num']) / float(job['output_fps'])
+                execution = manifest.get('runtime_plan', {}).get('execution', {})
+                expected_duration = result_row.get('generated_duration_sec') if result_row else None
+                if manifest.get('_legacy'):
+                    legacy_generation = manifest.get('_legacy_generation', {}).get(shot_id, {})
+                    expected_duration = (expected_duration or
+                                         legacy_generation.get('generated_duration_sec') or
+                                         job.get('target_duration_sec'))
+                    expected_fps = float(legacy_generation.get('fps', 24))
+                else:
+                    expected_fps = float(execution.get('fps', 24))
+                    if execution.get('frame_num') and execution.get('fps'):
+                        expected_duration = float(execution['frame_num']) / float(execution['fps'])
                 if expected_duration:
-                    tolerance = max(0.15, 2.0 / float(job.get('output_fps', 24)))
+                    tolerance = max(0.15, 2.0 / expected_fps)
                     require(info['duration'] + tolerance >= float(expected_duration),
-                            shot_id + ': generated video is shorter than the requested duration')
+                            shot_id + ': generated video is shorter than the selected profile output')
             except (OSError, ValueError, subprocess.SubprocessError) as error:
-                failed.append({'id': shot_id, 'reason': str(error) + '; fallback remains active'})
+                failed.append({'id': shot_id, **fallback_result(provider, 'E_EXPORT'),
+                               'error': str(error)})
                 continue
-            expected = manifest.get('backend', {}).get('size')
-            if expected and '*' in expected:
-                width, height = [int(value) for value in expected.split('*')]
+            expected = (None if manifest.get('_legacy') else
+                        manifest.get('runtime_plan', {}).get('execution', {}).get('resolution'))
+            if expected and ('*' in expected or 'x' in expected):
+                separator = '*' if '*' in expected else 'x'
+                width, height = [int(value) for value in expected.split(separator)]
                 require((info['width'], info['height']) == (width, height),
-                        shot_id + ': output resolution does not match job backend')
+                        shot_id + ': output resolution does not match RuntimePlan')
             cache_key = job.get('cache_key')
             require(isinstance(cache_key, str) and re.fullmatch(r'[0-9a-f]{64}', cache_key),
                     shot_id + ': missing or invalid cache_key')
@@ -244,8 +293,11 @@ def import_generated_videos(project_path, results_path, jobs_path=None, ffprobe=
                 'cache_key': cache_key,
                 'asset': relative,
                 'sha256': output_hash,
-                'model': manifest.get('backend', {}).get('model'),
-                'model_revision': manifest.get('backend', {}).get('model_revision'),
+                'model': manifest.get('provider_config', {}).get('model'),
+                'model_revision': manifest.get('provider_config', {}).get('model_revision'),
+                'runtime': manifest.get('runtime_plan', {}).get('runtime'),
+                'profile': manifest.get('runtime_plan', {}).get('profile'),
+                'runtime_plan_digest': manifest.get('runtime_plan', {}).get('plan_digest'),
                 'imported_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
                 **info,
             }
@@ -257,7 +309,7 @@ def import_generated_videos(project_path, results_path, jobs_path=None, ffprobe=
         write_json(project_path, config)
         write_json(index_path, index)
         report = root / '.narrated-video' / 'generated-video-import.json'
-        write_json(report, {'version': 2, 'provider': provider, 'imported': imported,
+        write_json(report, {'version': 3, 'provider': provider, 'imported': imported,
                             'failed': failed, 'fallback_active': [row['id'] for row in failed]})
         return {'project': str(project_path), 'provider': provider, 'imported': imported,
                 'failed': failed, 'report': str(report)}

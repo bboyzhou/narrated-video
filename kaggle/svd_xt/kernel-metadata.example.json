@@ -1,0 +1,18 @@
+{
+  "id": "YOUR_KAGGLE_USERNAME/narrated-video-svd-xt-worker",
+  "title": "narrated-video SVD-XT worker",
+  "code_file": "run_svd_job.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "machine_shape": "NvidiaTeslaT4",
+  "enable_internet": true,
+  "dataset_sources": [
+    "YOUR_KAGGLE_USERNAME/narrated-video-svd-demo-input",
+    "priyanshu23upadhyay/stable-video-diffusion-img2vid-xt"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

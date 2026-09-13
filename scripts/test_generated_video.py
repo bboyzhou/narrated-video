@@ -1,181 +1,229 @@
-"""Tests for provider-independent generated-video preparation and import."""
+"""Tests for generic I2V providers, planning, packaging and fallback."""
 import json
-import os
-import shutil
-import subprocess
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
 
-from generators import build_video_job, file_sha256
-from generators.wan_kaggle import WanKaggleGenerator
+from generators import build_video_job, get_video_generator, normalize_provider
+from generators import PROVIDER_REGISTRY
+from generators.router import fallback_result, route_shots, select_provider
 from import_generated_videos import import_generated_videos
-from pipeline import initialize, read_json, write_json
+from planners import PROFILES
 from prepare_video_jobs import prepare_video_jobs
+from workers.i2v import format_runtime_plan, validate_worker_input
+from runtime_planner import hardware_from_inventory, replan_manifest
+
+
+def write_json(path, value):
+    Path(path).write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding='utf-8')
 
 
 class GeneratedVideoTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
-        self.storyboard = self.root / 'storyboard.json'
-        self.project = self.root / 'project.json'
-        self.image = self.root / 'source.png'
-        self.image.write_bytes(b'not-an-image')
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        (self.root / 'source.png').write_bytes(b'not-a-real-png-but-packaging-only')
         self.plan = {
             'id': 'S001', 'asset_strategy': 'generated_video',
             'source_image': 'source.png',
-            'motion_prompt': 'A gentle breeze moves the banner.',
-            'motion_constraints': ['preserve identity'],
-            'generation': {'provider': 'cogvideox_colab', 'mode': 'i2v',
-                           'duration_target': 4, 'seed': 7}
+            'motion_prompt': 'Cavalry advances through dust.',
+            'negative_prompt': 'distortion',
+            'motion_constraints': ['preserve identity', 'preserve composition'],
+            'generation': {'provider': 'skyreels_v2', 'mode': 'i2v',
+                           'seed': 7, 'target_duration_sec': 8,
+                           'motion': {'strength': 'high', 'camera': 'tracking'}},
         }
-        self.storyboard.write_text(json.dumps({
-            'version': 1,
-            'shots': [self.plan, {'id': 'S002', 'asset_strategy': 'generate'}],
-            'demo': {'shots': ['S001'], 'selection_reason': 'test',
-                     'validation_goals': ['test']}
-        }, ensure_ascii=False), encoding='utf-8')
+        self.project = {
+            'title': 'test',
+            'video_generation': {
+                'enabled': True, 'provider': 'skyreels_v2', 'profile': 'balanced',
+                'runtime': {'type': 'kaggle', 'hardware': {
+                    'gpus': [{'name': 'Tesla T4', 'vram_gib': 16,
+                              'supports_fp16': True, 'supports_bf16': False}] }},
+                'policy': 'highlights',
+                'i2v_budget': {'enabled': True, 'max_shots': 3,
+                               'max_generated_seconds_per_shot': 4},
+                'providers': {},
+            },
+            'shots': [{'id': 'S001', 'type': 'image', 'asset': 'source.png'}],
+            'demo': {'shots': ['S001']},
+        }
 
-    def test_prepare_filters_and_bundles(self):
-        output, bundle = self.root / 'video_jobs.json', self.root / 'video_jobs.zip'
-        result = prepare_video_jobs(self.storyboard, output=output, bundle=bundle)
-        payload = read_json(output)
-        self.assertEqual(result['jobs'], 1)
-        self.assertEqual(payload['version'], 2)
-        self.assertEqual([job['id'] for job in payload['jobs']], ['S001'])
-        self.assertEqual(payload['jobs'][0]['prompt'], 'A gentle breeze moves the banner.')
-        self.assertRegex(payload['jobs'][0]['cache_key'], r'^[0-9a-f]{64}$')
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_profiles_are_hardware_neutral(self):
+        self.assertEqual(set(PROFILES), {'smoke', 'fast', 'balanced', 'quality', 'max_quality'})
+        serialized = json.dumps(PROFILES).lower()
+        for token in ('t4', 'a100', 'fp16', 'bf16', 'frame_num', 'steps', 'offload'):
+            self.assertNotIn(token, serialized)
+
+    def test_legacy_combined_ids_only_select_runtime(self):
+        self.assertEqual(normalize_provider('skyreels_v2_kaggle'),
+                         ('skyreels_v2', {'type': 'kaggle'}))
+        self.assertEqual(normalize_provider('cogvideox_colab'),
+                         ('cogvideox', {'type': 'colab'}))
+
+    def test_same_balanced_profile_plans_for_hardware(self):
+        provider = get_video_generator('skyreels_v2')
+        request = {'target_duration_sec': 8}
+        t4 = provider.plan(request, 'balanced', {'type': 'kaggle'}, {
+            'gpus': [{'name': 'Tesla T4', 'vram_gib': 16,
+                      'supports_fp16': True, 'supports_bf16': False}]})
+        a100 = provider.plan(request, 'balanced', {'type': 'runpod'}, {
+            'gpus': [{'name': 'A100', 'vram_gib': 40,
+                      'supports_fp16': True, 'supports_bf16': True}]})
+        self.assertEqual(t4['profile'], a100['profile'])
+        self.assertEqual(t4['execution']['dtype'], 'float16')
+        self.assertTrue(t4['execution']['offload'])
+        self.assertEqual(a100['execution']['dtype'], 'bfloat16')
+        self.assertFalse(a100['execution']['offload'])
+
+    def test_job_is_content_only_and_target_is_not_generated_duration(self):
+        job, config, runtime_plan = build_video_job(
+            self.plan, 'input/S001.png', 'a' * 64, self.project)
+        self.assertEqual(job['target_duration_sec'], 8)
+        self.assertAlmostEqual(runtime_plan['generated_duration_sec'], 97 / 24, places=3)
+        self.assertEqual(runtime_plan['provider'], 'skyreels_v2')
+        self.assertEqual(runtime_plan['runtime'], 'kaggle')
+        self.assertIn('model', config)
+        for field in ('provider', 'runtime', 'profile', 'frame_num', 'steps', 'dtype',
+                      'offload', 'world_size', 'attention_backend', 'teacache'):
+            self.assertNotIn(field, job)
+
+    def test_job_rejects_execution_override(self):
+        changed = {**self.plan, 'generation': {**self.plan['generation'], 'frame_num': 49}}
+        with self.assertRaisesRegex(ValueError, 'planner-owned'):
+            build_video_job(changed, 'input/S001.png', 'a' * 64, self.project)
+
+    def test_provider_config_rejects_execution_override(self):
+        project = json.loads(json.dumps(self.project))
+        project['video_generation']['providers'] = {'skyreels_v2': {'dtype': 'float16'}}
+        with self.assertRaisesRegex(ValueError, 'planner-owned'):
+            build_video_job(self.plan, 'input/S001.png', 'a' * 64, project)
+
+    def test_prepare_writes_runtime_plan_and_content_jobs(self):
+        storyboard = self.root / 'storyboard.json'
+        project = self.root / 'project.json'
+        write_json(storyboard, {'version': 1, 'shots': [self.plan],
+                                'demo': {'shots': ['S001']}})
+        write_json(project, self.project)
+        output, bundle = self.root / 'jobs.json', self.root / 'jobs.zip'
+        result = prepare_video_jobs(storyboard, project, 'demo', output, bundle)
+        payload = json.loads(output.read_text(encoding='utf-8'))
+        self.assertEqual(result['provider'], 'skyreels_v2')
+        self.assertEqual(payload['runtime'], {'type': 'kaggle'})
+        self.assertEqual(payload['profile'], 'balanced')
+        self.assertIn('runtime_plan', payload)
+        self.assertNotIn('backend', payload)
+        validate_worker_input(payload)
         with zipfile.ZipFile(bundle) as archive:
             self.assertIn('video_jobs.json', archive.namelist())
             self.assertIn('input/S001.png', archive.namelist())
+            self.assertIn('runtime_support/runtime_planner.py', archive.namelist())
 
-    def test_prepare_rejects_missing_source(self):
-        data = json.loads(self.storyboard.read_text(encoding='utf-8'))
-        data['shots'][0]['source_image'] = 'missing.png'
-        self.storyboard.write_text(json.dumps(data), encoding='utf-8')
-        with self.assertRaises(ValueError):
-            prepare_video_jobs(self.storyboard, output=self.root / 'jobs.json')
+    def test_runtime_launcher_can_replan_without_changing_jobs(self):
+        job, config, plan = build_video_job(
+            self.plan, 'input/S001.png', 'a' * 64, self.project)
+        manifest = {'version': 3, 'provider': 'skyreels_v2', 'profile': 'balanced',
+                    'runtime': {'type': 'kaggle'}, 'provider_config': config,
+                    'runtime_plan': plan, 'jobs': [job]}
+        hardware = hardware_from_inventory([{
+            'name': 'A100', 'memory_total_mib': 40960, 'compute_capability': '8.0'}])
+        replanned = replan_manifest(manifest, hardware)
+        self.assertEqual(replanned['jobs'], manifest['jobs'])
+        self.assertEqual(replanned['runtime_plan']['hardware_basis'], 'detected')
+        self.assertEqual(replanned['runtime_plan']['execution']['dtype'], 'bfloat16')
 
-    def test_wan_cache_key_covers_model_prompt_seed_and_image(self):
-        project = {'video_generation': {'enabled': True, 'provider': 'wan22_kaggle',
-                   'providers': {'wan22_kaggle': {'model_revision': 'dataset-v1'}}}}
-        plan = {**self.plan, 'generation': {**self.plan['generation'],
-                                           'provider': 'wan22_kaggle'}}
-        first, _ = build_video_job(plan, 'input/S001.png', 'a' * 64, project)
-        changed_prompt, _ = build_video_job(
-            {**plan, 'motion_prompt': 'Dust drifts.'}, 'input/S001.png', 'a' * 64, project)
-        changed_image, _ = build_video_job(plan, 'input/S001.png', 'b' * 64, project)
-        changed_model, _ = build_video_job(
-            plan, 'input/S001.png', 'a' * 64,
-            {'video_generation': {'enabled': True, 'provider': 'wan22_kaggle',
-             'providers': {'wan22_kaggle': {'model_revision': 'dataset-v2'}}}})
-        self.assertEqual(first['frame_num'] % 4, 1)
-        self.assertEqual(len({first['cache_key'], changed_prompt['cache_key'],
-                              changed_image['cache_key'], changed_model['cache_key']}), 4)
+    def test_runtime_plan_log_is_auditable(self):
+        _, _, plan = build_video_job(self.plan, 'input/S001.png', 'a' * 64, self.project)
+        output = format_runtime_plan(plan, target_seconds=8)
+        for value in ('skyreels_v2', 'balanced', 'kaggle', 'Tesla T4',
+                      'float16', 'generated seconds', 'target seconds'):
+            self.assertIn(value, output)
 
-    def _ffmpeg(self):
-        return os.environ.get('FFMPEG') or shutil.which('ffmpeg')
+    def test_worker_rejects_model_parameters_in_job(self):
+        job, config, plan = build_video_job(self.plan, 'input/S001.png', 'a' * 64, self.project)
+        job['inference_steps'] = 1
+        manifest = {'version': 3, 'provider': 'skyreels_v2', 'profile': 'balanced',
+                    'runtime': {'type': 'kaggle'}, 'provider_config': config,
+                    'runtime_plan': plan, 'jobs': [job]}
+        with self.assertRaisesRegex(ValueError, 'planner-owned'):
+            validate_worker_input(manifest)
 
-    @unittest.skipUnless(os.environ.get('FFMPEG') or shutil.which('ffmpeg'),
-                         'FFmpeg unavailable')
-    def test_import_preserves_fallback_and_registers_cache(self):
-        self.storyboard.unlink()
-        initialize(self.project, None)
-        project = read_json(self.project)
-        project.update({'video_generation': {'enabled': True, 'provider': 'cogvideox_colab'},
-                        'shots': [
-            {'id': 'S001', 'type': 'image', 'asset': 'source.png',
-             'narration': ['N1'], 'motion': 'push', 'transition': .2,
-             'prompt': 'x', 'negative_prompt': 'y'},
-            {'id': 'S002', 'type': 'image', 'asset': 'other.png',
-             'narration': ['N2'], 'motion': 'push', 'transition': .2,
-             'prompt': 'x', 'negative_prompt': 'y'}
-        ], 'demo': {'shots': ['S001']}})
-        write_json(self.project, project)
-        results = self.root / 'output'
+    def test_hero_router_enforces_budget(self):
+        shots = [{'id': 'A', 'motion_mode': 'i2v'}, {'id': 'B'},
+                 {'id': 'C', 'asset_strategy': 'generated_video'}]
+        routed = route_shots(shots, {'enabled': True,
+                                     'i2v_budget': {'enabled': True, 'max_shots': 1}})
+        self.assertEqual([row['id'] for row in routed['i2v']], ['A'])
+        self.assertEqual([row['id'] for row in routed['motion']], ['B', 'C'])
+
+    def test_failure_becomes_remotion_fallback(self):
+        result = fallback_result('skyreels_v2', 'timeout', 'images/S001.png')
+        self.assertEqual(result['actual_provider'], 'remotion_motion')
+        self.assertEqual(result['status'], 'fallback')
+        self.assertEqual(result['reason'], 'E_I2V_TIMEOUT')
+
+    def test_failed_import_records_fallback_without_mutating_shot(self):
+        project_path = self.root / 'project.json'
+        write_json(project_path, self.project)
+        job, config, runtime_plan = build_video_job(
+            self.plan, 'input/S001.png', 'a' * 64, self.project)
+        jobs_path = self.root / 'video_jobs.json'
+        write_json(jobs_path, {
+            'version': 3, 'project_id': 'test', 'provider': 'skyreels_v2',
+            'profile': 'balanced', 'runtime': {'type': 'kaggle'},
+            'mode': 'i2v', 'stage': 'demo', 'provider_config': config,
+            'runtime_plan': runtime_plan, 'jobs': [job], 'cache_hits': [],
+        })
+        results = self.root / 'results'
         results.mkdir()
-        subprocess.run([self._ffmpeg(), '-hide_banner', '-loglevel', 'error', '-y',
-                         '-f', 'lavfi', '-i', 'color=c=blue:s=64x64:r=8', '-t', '4',
-                        '-an', results / 'S001.mp4'], check=True)
-        cache_key = build_video_job(self.plan, 'input/S001.png',
-                                    file_sha256(self.image), project)[0]['cache_key']
-        write_json(self.storyboard, {'version': 1, 'shots': [self.plan],
-                                    'demo': {'shots': ['S001']}})
-        jobs = self.root / 'video_jobs.json'
-        write_json(jobs, {'version': 1, 'provider': 'cogvideox_colab',
-                          'jobs': [{'id': 'S001', 'output': 'S001.mp4'}]})
-        outcome = import_generated_videos(self.project, results, jobs,
-                                          ffmpeg=self._ffmpeg())
-        updated = read_json(self.project)
-        self.assertEqual(len(outcome['imported']), 1)
-        self.assertEqual(updated['shots'][0]['type'], 'image')
-        self.assertEqual(updated['shots'][0]['asset'], 'source.png')
-        generated = updated['shots'][0]['generated_video']
-        self.assertEqual(generated['cache_key'], cache_key)
-        self.assertTrue((self.root / generated['asset']).is_file())
-        index = read_json(self.root / '.narrated-video/generated-video-index.json')
-        self.assertEqual(index['entries'][cache_key]['sha256'],
-                         file_sha256(self.root / generated['asset']))
-        prepared = prepare_video_jobs(self.storyboard, self.project, 'demo',
-                                      self.root / 'second-jobs.json')
-        self.assertEqual(prepared['jobs'], 0)
-        self.assertEqual(prepared['cache_hits'], 1)
+        write_json(results / 'results.json', {'results': [{
+            'id': 'S001', 'status': 'failed', 'code': 'E_I2V_TIMEOUT',
+            'error': 'timed out',
+        }]})
+        outcome = import_generated_videos(project_path, results, jobs_path)
+        self.assertEqual(outcome['failed'][0]['actual_provider'], 'remotion_motion')
+        self.assertEqual(outcome['failed'][0]['reason'], 'E_I2V_TIMEOUT')
+        self.assertNotIn('generated_video',
+                         json.loads(project_path.read_text(encoding='utf-8'))['shots'][0])
 
-    @unittest.skipUnless(os.environ.get('FFMPEG') or shutil.which('ffmpeg'),
-                         'FFmpeg unavailable')
-    def test_import_rejects_truncated_video(self):
-        self.storyboard.unlink()
-        initialize(self.project, None)
-        project = read_json(self.project)
-        project.update({'video_generation': {'enabled': True, 'provider': 'cogvideox_colab'},
-                        'shots': [{'id': 'S001', 'type': 'image', 'asset': 'source.png',
-                                   'narration': ['N1'], 'motion': 'push', 'transition': .2,
-                                   'prompt': 'x', 'negative_prompt': 'y'}],
-                        'demo': {'shots': ['S001']}})
-        write_json(self.project, project)
-        results = self.root / 'output'
-        results.mkdir()
-        subprocess.run([self._ffmpeg(), '-hide_banner', '-loglevel', 'error', '-y',
-                         '-f', 'lavfi', '-i', 'color=c=blue:s=64x64:r=8', '-t', '1',
-                         '-an', results / 'S001.mp4'], check=True)
-        jobs = self.root / 'video_jobs.json'
-        write_json(jobs, {'version': 2, 'provider': 'cogvideox_colab', 'backend': {},
-                          'jobs': [{'id': 'S001', 'duration_target': 4,
-                                    'cache_key': 'b' * 64, 'output': 'S001.mp4'}]})
-        result = import_generated_videos(self.project, results, jobs, ffmpeg=self._ffmpeg())
-        self.assertEqual(result['failed'][0]['id'], 'S001')
-        self.assertNotIn('generated_video', read_json(self.project)['shots'][0])
+    def test_provider_selection_is_separate_from_runtime(self):
+        self.assertEqual(select_provider('skyreels_v2', ['skyreels_v2', 'cogvideox'],
+                                         PROVIDER_REGISTRY, 'kaggle'), 'skyreels_v2')
+        self.assertEqual(select_provider('skyreels_v2', ['skyreels_v2'],
+                                         PROVIDER_REGISTRY, 'cloud_api'),
+                         'remotion_motion')
 
-    def test_wan_duration_above_worker_limit_is_rejected(self):
-        backend = {**WanKaggleGenerator.defaults, 'model_revision': 'dataset-v1'}
-        with self.assertRaisesRegex(ValueError, 'exceeds max_frame_num'):
-            WanKaggleGenerator().normalize_generation({'seed': 1, 'duration_target': 6}, backend)
+    def test_wan_and_cogvideox_share_job_contract(self):
+        for provider in ('wan22', 'cogvideox', 'svd_xt'):
+            project = json.loads(json.dumps(self.project))
+            project['video_generation']['provider'] = provider
+            project['video_generation']['providers'] = {
+                provider: {'model_revision': 'pinned-test-revision'}}
+            plan = json.loads(json.dumps(self.plan))
+            plan['generation']['provider'] = provider
+            job, _, runtime_plan = build_video_job(
+                plan, 'input/S001.png', 'a' * 64, project)
+            self.assertEqual(set(job), set(build_video_job(
+                self.plan, 'input/S001.png', 'a' * 64, self.project)[0]))
+            self.assertEqual(runtime_plan['provider'], provider)
 
-    @unittest.skipUnless(os.environ.get('FFMPEG') or shutil.which('ffmpeg'),
-                         'FFmpeg unavailable')
-    def test_failed_job_keeps_fallback(self):
-        self.storyboard.unlink()
-        initialize(self.project, None)
-        project = read_json(self.project)
-        project['shots'] = [{'id': 'S001', 'type': 'image', 'asset': 'source.png',
-                             'narration': ['N1'], 'motion': 'push', 'transition': .2,
-                             'prompt': 'x', 'negative_prompt': 'y'}]
-        write_json(self.project, project)
-        results = self.root / 'empty-results'
-        results.mkdir()
-        write_json(results / 'results.json', {'results': [
-            {'id': 'S001', 'status': 'failed', 'error': 'CUDA out of memory'}]})
-        jobs = self.root / 'video_jobs.json'
-        write_json(jobs, {'version': 2, 'provider': 'wan22_kaggle', 'backend': {},
-                          'jobs': [{'id': 'S001', 'cache_key': 'b' * 64,
-                                    'output': 'output/S001.mp4'}]})
-        result = import_generated_videos(self.project, results, jobs,
-                                         ffmpeg=self._ffmpeg())
-        self.assertEqual(result['failed'][0]['id'], 'S001')
-        self.assertNotIn('generated_video', read_json(self.project)['shots'][0])
+    def test_cloud_provider_uses_same_job_contract(self):
+        project = json.loads(json.dumps(self.project))
+        project['video_generation'].update({'provider': 'cloud_i2v',
+                                            'runtime': {'type': 'cloud_api'}})
+        project['video_generation']['providers'] = {
+            'cloud_i2v': {'model': 'vendor/model', 'model_revision': 'api-v1'}}
+        plan = json.loads(json.dumps(self.plan))
+        plan['generation']['provider'] = 'cloud_i2v'
+        job, _, runtime_plan = build_video_job(
+            plan, 'input/S001.png', 'a' * 64, project)
+        self.assertNotIn('service_quality', job)
+        self.assertEqual(runtime_plan['runtime'], 'cloud_api')
+        self.assertEqual(runtime_plan['execution']['dtype'], 'managed')
 
 
 if __name__ == '__main__':

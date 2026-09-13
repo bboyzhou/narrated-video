@@ -1,0 +1,71 @@
+{
+  "version": 3,
+  "project_id": "demo",
+  "provider": "svd_xt",
+  "profile": "smoke",
+  "runtime": {
+    "type": "kaggle"
+  },
+  "mode": "i2v",
+  "stage": "demo",
+  "provider_config": {
+    "engine": "diffusers_svd",
+    "model": "stabilityai/stable-video-diffusion-img2vid-xt",
+    "model_revision": "kaggle:priyanshu23upadhyay/stable-video-diffusion-img2vid-xt@dataset-8674001"
+  },
+  "runtime_plan": {
+    "provider": "svd_xt",
+    "runtime": "kaggle",
+    "profile": "smoke",
+    "execution": {
+      "dtype": "float16",
+      "resolution": "1024x576",
+      "frame_num": 8,
+      "fps": 7,
+      "inference_steps": 8,
+      "decode_chunk_size": 2,
+      "motion_bucket_id": 80,
+      "noise_aug_strength": 0.02,
+      "model_cpu_offload": true,
+      "forward_chunking": true,
+      "vae_slicing": false,
+      "world_size": 1
+    },
+    "generated_duration_sec": 1.1429,
+    "hardware": {
+      "gpu_count": 0,
+      "gpus": [],
+      "ram_available_gib": 0.0,
+      "software": {},
+      "detected": false
+    },
+    "hardware_basis": "unknown_conservative",
+    "timeout": {
+      "expected_runtime_sec": 120,
+      "soft_timeout_sec": 180,
+      "hard_timeout_sec": 270
+    },
+    "plan_digest": "ae1b99b58c2cf211e1d6883dca101466fa394fc827e850ed3535c9c7781ef650"
+  },
+  "jobs": [
+    {
+      "id": "S001",
+      "image": "input/S001.png",
+      "source_image_sha256": "3e144ace7f0ddf1bdff7b85b063e0885214604adecb15cdd9539702028b81cea",
+      "prompt": "The pelican pedals the bicycle forward while its feathers and the seaside palm leaves move gently.",
+      "negative_prompt": "",
+      "constraints": [
+        "preserve the pelican identity",
+        "preserve the bicycle structure",
+        "preserve the seaside composition",
+        "no text or watermark"
+      ],
+      "seed": 38123,
+      "target_duration_sec": 10.0,
+      "cache_key": "6d6a936f227164fa1ec6c3705e74252f1258a43be072afb727f3923c0ac47ce6",
+      "output": "output/S001.mp4",
+      "fallback_asset": null
+    }
+  ],
+  "cache_hits": []
+}

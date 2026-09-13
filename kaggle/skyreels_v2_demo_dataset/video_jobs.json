@@ -1,0 +1,75 @@
+{
+  "version": 3,
+  "project_id": "skyreels_v2_pelican_demo",
+  "provider": "skyreels_v2",
+  "profile": "balanced",
+  "runtime": {
+    "type": "kaggle"
+  },
+  "mode": "i2v",
+  "stage": "demo",
+  "provider_config": {
+    "engine": "skyreels_v2_native_i2v",
+    "model": "Skywork/SkyReels-V2-I2V-1.3B-540P",
+    "model_revision": "e86231f3882225e5a93eeec740c77bc7f01954ca",
+    "source_revision": "9351d13152207cc04de780e055346b08ade0b851",
+    "source_sha256": "3571f1f6d2da99a360d879fb6acf91850ce8c1455c8f67d13501a5b0159c77da"
+  },
+  "runtime_plan": {
+    "provider": "skyreels_v2",
+    "runtime": "kaggle",
+    "profile": "balanced",
+    "execution": {
+      "dtype": "float16",
+      "resolution": "960x544",
+      "frame_num": 97,
+      "fps": 24,
+      "inference_steps": 25,
+      "guidance_scale": 5.0,
+      "shift": 3.0,
+      "attention_backend": "sdpa",
+      "teacache": true,
+      "teacache_thresh": 0.1,
+      "use_ret_steps": true,
+      "offload": true,
+      "world_size": 1
+    },
+    "generated_duration_sec": 4.0417,
+    "hardware": {
+      "gpu_count": 0,
+      "gpus": [],
+      "ram_available_gib": 0.0,
+      "software": {},
+      "detected": false
+    },
+    "hardware_basis": "unknown_conservative",
+    "timeout": {
+      "expected_runtime_sec": 2182,
+      "soft_timeout_sec": 3273,
+      "hard_timeout_sec": 4909
+    },
+    "plan_digest": "8e30713e88f6d0b20447059383d24f669e3ff00421c56384ba45257e1e031526"
+  },
+  "jobs": [
+    {
+      "id": "S001",
+      "image": "input/S001.png",
+      "source_image_sha256": "3e144ace7f0ddf1bdff7b85b063e0885214604adecb15cdd9539702028b81cea",
+      "prompt": "A cheerful white pelican naturally rides and pedals the blue bicycle forward from left to right along the sunny seaside promenade. Both bicycle wheels rotate smoothly, the pelican's legs pedal continuously, its body balances gently, and its feathers and the nearby palm leaves move subtly in the sea breeze. The camera tracks alongside at a steady pace. Bright cinematic daylight, coherent natural motion.",
+      "negative_prompt": "distorted bicycle, extra legs, extra wings, fused limbs, deformed beak, identity change, stationary wheels, backward motion, camera shake, flicker, text, logo, watermark",
+      "constraints": [
+        "preserve the same white pelican identity and orange beak",
+        "preserve the blue bicycle geometry and two wheels",
+        "preserve the sunny seaside promenade composition",
+        "continuous forward pedaling with smooth wheel rotation",
+        "no text, logo, or watermark"
+      ],
+      "seed": 38123,
+      "target_duration_sec": 4.0,
+      "cache_key": "c85110932beef6d14b5f7573b94e05ef88a407dd1a4649cf7ffa1f297d10afb7",
+      "output": "output/S001.mp4",
+      "fallback_asset": "../cogvideox_demo/input/S001.png"
+    }
+  ],
+  "cache_hits": []
+}

@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "provider": "cogvideox",
+  "profile": "balanced",
+  "runtime": {"type": "kaggle"},
+  "note": "Use video-prepare to generate a complete manifest and RuntimePlan; quantization is planner-owned."
+}

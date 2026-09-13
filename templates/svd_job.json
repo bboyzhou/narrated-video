@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "provider": "svd_xt",
+  "profile": "smoke",
+  "runtime": {"type": "kaggle"},
+  "note": "Use video-prepare to generate a complete manifest and RuntimePlan. SVD motion controls are planner-owned."
+}

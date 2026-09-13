@@ -22,7 +22,7 @@ from runtime import (resolve_paths, validate_paths, relaunch, path_report, docto
                      update_config, write_global_runtime)
 from composition import resolve_asset, validate_layers, render_args
 from generators import (build_video_job, file_sha256 as generated_file_sha256,
-                        provider_for_plan, validate_video_policy)
+                        normalize_provider, provider_for_plan, validate_video_policy)
 
 VERSION = 1
 
@@ -611,9 +611,10 @@ class Project:
         if not plan or plan.get('asset_strategy') != 'generated_video':
             return None
         source = self.path_for(plan['source_image'])
-        job, backend = build_video_job(plan, plan['source_image'],
-                                       generated_file_sha256(source), self.c)
-        return {'job': job, 'backend': backend}
+        job, provider_config, runtime_plan = build_video_job(
+            plan, plan['source_image'], generated_file_sha256(source), self.c)
+        return {'job': job, 'provider': runtime_plan['provider'],
+                'provider_config': provider_config, 'runtime_plan': runtime_plan}
 
     def resolved_shot(self, shot):
         """Use an exact generated cache hit, otherwise retain the approved fallback."""
@@ -626,7 +627,8 @@ class Project:
             if not isinstance(candidate, dict):
                 continue
             asset = candidate.get('asset')
-            if (candidate.get('provider') != job['provider'] or
+            candidate_provider = normalize_provider(candidate.get('provider'))[0]
+            if (candidate_provider != current['provider'] or
                     candidate.get('cache_key') != job['cache_key'] or not asset):
                 continue
             path = self.path_for(asset)
@@ -649,7 +651,7 @@ class Project:
             return None
         resolved = self.resolved_shot(shot)
         ready = resolved.get('type') == 'video' and resolved.get('asset') != shot.get('asset')
-        return {'id': shot['id'], 'provider': current['job']['provider'],
+        return {'id': shot['id'], 'provider': current['provider'],
                 'cache_key': current['job']['cache_key'],
                 'status': 'ready' if ready else 'fallback',
                 'asset': resolved.get('asset') if ready else shot.get('asset')}
@@ -1238,9 +1240,14 @@ def initialize(path, source):
                                            'max_tempo': 1.12, 'min_units': 6}},
                        'subtitles': {'enabled': True, 'font': 'Microsoft YaHei', 'size': 48, 'min_size': 28, 'max_width_ratio': 0.88, 'margin': 30, 'max_chars': 24},
                        'motion': {'easing': 'smoothstep', 'max_zoom': 0.06},
-                       'video_generation': {'enabled': False, 'provider': 'wan22_kaggle',
-                                            'execution': 'remote_manual', 'policy': 'highlights',
-                                            'max_scenes': 5, 'providers': {}},
+                       'video_generation': {
+                           'enabled': False, 'provider': 'skyreels_v2',
+                           'profile': 'balanced', 'runtime': {'type': 'auto'},
+                           'policy': 'highlights',
+                           'i2v_budget': {'enabled': True, 'max_shots': 3,
+                                          'max_generated_seconds_per_shot': 4},
+                           'providers': {},
+                       },
                        'narration': [], 'shots': [], 'demo': {'shots': []}, 'music': []})
     print('Created ' + str(path) + '; run preflight before drafting the spoken script or production plan.')
 

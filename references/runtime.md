@@ -21,7 +21,7 @@ macOS/Linux 使用相同的命令，将解释器和工具路径换成 POSIX 路�
 
 `configure` 记录选择，不代替用户做选择；只验证文件/目录存在，不导入模型或下载资源。`doctor` 是轻量诊断；`preflight` 是制作前硬门禁，成功后写入项目 `.narrated-video/preflight.json`。用户明确同意时再运行 `remember-runtime`，将通过当前 preflight 的路径保存到当前用户的全局配置文件 `${CODEX_HOME}/narrated-video/runtime.json`（未设置时为 `~/.codex/narrated-video/runtime.json`）。这个文件供不同 Agent 会话复用，不修改系统 PATH，也不需要管理员权限。
 
-Wan2.2/Kaggle 等生成式视频 provider 不属于本地运行环境门禁。可在项目中记录 `video_generation.provider: wan22_kaggle`、`execution: remote_manual`；`preflight` 不检查本地 CUDA、torch、模型权重或 Kaggle 连通性。任务包、Kaggle Worker、缓存和结果导回见 [生成式视频](generated-video.md)。导入优先使用 `ffprobe`，缺少时复用已选择的 FFmpeg 解码并检查视频流。
+SkyReels/SVD-XT/Wan2.2/CogVideoX 等 I2V Provider 不属于本地渲染环境门禁。项目分别记录 `video_generation.provider`、通用 `profile` 与 `runtime.type`；本地 `preflight` 不替远端 Runtime 检查 CUDA、torch、模型权重或平台连通性。Runtime launcher 必须在模型加载前探测实际 Hardware，并核对或重建 RuntimePlan。任务包、缓存和结果导回见 [生成式视频](generated-video.md)。
 
 `preflight` 检查 FFmpeg 的版本、`perspective`/`xfade`/`subtitles`/响度与混音滤镜以及 `libx264`/AAC 编码器。MeloTTS 模式还检查模块、NLTK，并强制离线实际加载所选语言模型与 speaker，确保缓存完整；CosyVoice 模式使用临时短句验证命令、模型目录和 PCM WAV 输出，配置了 `batch_command` 时优先按一条 job 的 manifest 验证批量入口；`files` 模式跳过 TTS 检查。临时样本会删除，不生成项目媒体。
 
