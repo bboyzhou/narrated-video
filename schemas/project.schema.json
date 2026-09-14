@@ -7,6 +7,14 @@
   "properties": {
     "version": {"const": 1},
     "storyboard": {"type": "string", "minLength": 1},
+    "renderer": {
+      "type": "object",
+      "properties": {
+        "engine": {"enum": ["ffmpeg", "remotion"]},
+        "fallback": {"enum": ["ffmpeg", "none"]}
+      },
+      "additionalProperties": false
+    },
     "video_generation": {
       "type": "object",
       "properties": {

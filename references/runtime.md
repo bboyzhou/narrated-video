@@ -11,7 +11,7 @@
 ```powershell
 python $pipeline paths $project
 # 下列均为示例占位路径，必须替换为用户实际选中的路径。
-python $pipeline configure $project --python 'D:/tools/MeloTTS/.venv/Scripts/python.exe' --ffmpeg 'D:/tools/ffmpeg.exe' --nltk-data 'D:/resources/nltk-data' --hf-home 'D:/resources/huggingface-cache' --transformers-cache 'D:/resources/huggingface-cache/transformers' --offline true
+python $pipeline configure $project --python 'D:/tools/MeloTTS/.venv/Scripts/python.exe' --ffmpeg 'D:/tools/ffmpeg.exe' --node 'C:/Program Files/nodejs/node.exe' --browser 'C:/Program Files/Google/Chrome/Application/chrome.exe' --nltk-data 'D:/resources/nltk-data' --hf-home 'D:/resources/huggingface-cache' --transformers-cache 'D:/resources/huggingface-cache/transformers' --offline true
 python $pipeline doctor $project
 python $pipeline preflight $project
 python $pipeline remember-runtime $project
@@ -31,6 +31,8 @@ SkyReels/SVD-XT/Wan2.2/CogVideoX 等 I2V Provider 不属于本地渲染环境门
 "runtime": {
   "python": "D:/tools/MeloTTS/.venv/Scripts/python.exe",
   "ffmpeg": "D:/tools/ffmpeg.exe",
+  "node": "C:/Program Files/nodejs/node.exe",
+  "browser": "C:/Program Files/Google/Chrome/Application/chrome.exe",
   "nltk_data": "D:/resources/nltk-data",
   "hf_home": "D:/resources/huggingface-cache",
   "hf_hub_cache": "D:/resources/huggingface-cache/hub",
@@ -45,6 +47,7 @@ SkyReels/SVD-XT/Wan2.2/CogVideoX 等 I2V Provider 不属于本地渲染环境门
 - `hf_hub_cache` 对应 `HF_HUB_CACHE`；`transformers_cache` 对应 `TRANSFORMERS_CACHE`。显式项目值优先于进程环境变量，未配置的字段保留原环境行为。
 - `HF_HOME` 通常足够；未单独配置两个子目录时，脚本将 Hub 与 Transformers 缓存统一指向其 `hub/` 子目录。只有已有缓存分开存放时才分别配置 `hf_hub_cache` 和 `transformers_cache`。
 - FFmpeg 优先级：本次 `--ffmpeg` > 项目 `runtime.ffmpeg` > 全局运行环境 > `NARRATED_VIDEO_FFMPEG`/`FFMPEG` > PATH。显式路径无效就报错，不静默回退；临时覆盖不会更新已保存路径，正式换环境应通过 configure。
+- Remotion 需要项目 `runtime.node` 与 `runtime.browser` 指向已存在的 Node.js 和 Chrome/Edge 可执行文件；渲染器不会自动下载浏览器。只有项目设置 `renderer.engine: "remotion"` 时才使用这两个路径。
 - 可选的跨会话候选变量为 `NARRATED_VIDEO_FFMPEG` 和 `NARRATED_VIDEO_MELOTTS_PYTHON`；`FFMPEG`、`NLTK_DATA`、`HF_HOME`、`HF_HUB_CACHE`、`TRANSFORMERS_CACHE` 继续兼容。环境变量只是候选，`remember-runtime` 保存的全局配置和项目配置优先。
 - 新建项目 `offline: true`，设置 Hugging Face 和 Transformers 离线模式。`false` 仅表示允许相关库联网，不能视为安装或下载授权。旧项目没有 runtime 时保持原启动方式，agent 在下一次使用前补做用户路径选择。
 - `doctor` 使用所选 Python 做轻量检查，不导入整个 TTS 模型；`preflight` 才执行严格的离线模型加载或临时短句测试。任何 `check`、审批记录、配音、渲染和验证都要求当前 preflight 有效。

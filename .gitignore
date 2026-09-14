@@ -8,6 +8,7 @@ kaggle/svd_smoke_output/
 kaggle/kernel-metadata.json
 .env
 .env.*
+renderers/remotion/node_modules/
 *.log
 *.mp4
 *.wav

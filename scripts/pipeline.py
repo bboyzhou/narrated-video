@@ -602,6 +602,7 @@ class Project:
         motion_cfg = c.get('motion', {})
         require(motion_cfg.get('easing', 'smoothstep') in ('linear', 'smoothstep'), 'motion.easing must be linear or smoothstep')
         require(0 <= float(motion_cfg.get('max_zoom', 0.06)) <= 0.15, 'motion.max_zoom must be 0..0.15')
+        self.renderer_config()
 
     def selected(self, stage):
         return [self.shots[s] for s in self.c['demo']['shots']] if stage == 'demo' else self.c['shots']
@@ -708,6 +709,24 @@ class Project:
         return [{**layer, **self.asset(layer['asset']), 'shot': shot['id']}
                 for shot in shots for layer in shot.get('layers', [])]
 
+    def renderer_config(self):
+        config = self.c.get('renderer', {})
+        require(isinstance(config, dict), 'renderer must be an object')
+        engine = config.get('engine', 'ffmpeg')
+        require(engine in ('ffmpeg', 'remotion'), 'renderer.engine must be ffmpeg or remotion')
+        fallback = config.get('fallback', 'ffmpeg')
+        require(fallback in ('ffmpeg', 'none'), 'renderer.fallback must be ffmpeg or none')
+        return {'engine': engine, 'fallback': fallback}
+
+    def build_render_plan(self, stage, selected, voices, timeline):
+        from remotion_adapter import build_render_plan
+        plan = build_render_plan(self, stage, selected, voices, timeline)
+        destination = self.root / 'deliverables'
+        destination.mkdir(exist_ok=True)
+        target = destination / (stage + '-render-plan.json')
+        write_json(target, plan)
+        return target
+
     def demo_key(self):
         shots = self.selected('demo')
         voices = []
@@ -732,6 +751,7 @@ class Project:
                        'layers': self.layer_assets(shots),
                        'music': [(m, self.asset(m['path'])) for m in self.c.get('music', [])],
                        'mix': self.c.get('mix', {}),
+                       'renderer': self.c.get('renderer', {}),
                        'runtime': {**self.c.get('runtime', {}), **self.runtime},
                        'renderer': [file_hash(__file__), file_hash(Path(__file__).with_name('runtime.py')),
                                     file_hash(Path(__file__).with_name('composition.py'))]})
@@ -1080,13 +1100,34 @@ class Project:
         if stage == 'demo' and selected[0]['id'] != self.c['shots'][0]['id']:
             require('start_seconds' in self.c['demo'], 'Middle Demo requires demo.start_seconds for music placement')
             offset = self.c['demo']['start_seconds']
-        args = ['-filter_complex_threads', '1', '-i', joined]
+        renderer = self.renderer_config()
+        visual_source = joined
+        actual_renderer = 'ffmpeg'
+        if renderer['engine'] == 'remotion':
+            plan_path = self.build_render_plan(stage, selected, voices, timeline)
+            remotion_output = self.cache / (digest({'plan': file_hash(plan_path), 'renderer': 'remotion'}) + '.mp4')
+            try:
+                from remotion_adapter import render as render_remotion
+                render_remotion(plan_path, remotion_output,
+                                self.runtime.get('node') or os.environ.get('NODE') or 'node')
+                visual_source = remotion_output
+                actual_renderer = 'remotion'
+            except (OSError, RuntimeError) as error:
+                if renderer['fallback'] != 'ffmpeg':
+                    raise
+                print('WARNING: Remotion unavailable; falling back to FFmpeg: ' + str(error), file=sys.stderr)
+        args = ['-filter_complex_threads', '1', '-i', visual_source]
+        if visual_source != joined:
+            audio_only = self.cached('audio-track', [file_hash(joined)], '.wav',
+                                     lambda p: self.ff(['-i', joined, '-vn', '-c:a', 'pcm_s16le', '-ar', '48000', '-ac', '2', p]))
+            args += ['-i', audio_only]
         sub = self.c['subtitles']
         mix = self.c.get('mix', {})
         size = self._subtitle_effective_size * h / 720
         # SRT rendering uses libass PlayResY=288; convert pixel target to ASS units.
         vf = f"subtitles=filename=captions.srt:force_style='FontName={sub['font']},FontSize={size*288/h},Outline=1,Shadow=0,Alignment=2,MarginV={sub.get('margin', 28)*288/720}'" if sub.get('enabled', True) else 'null'
-        filters = [f'[0:v]{vf}[v]', '[0:a]loudnorm=I=-18:TP=-2:LRA=7,aresample=48000,asplit=2[voice][key]']
+        audio_label = '[1:a]' if visual_source != joined else '[0:a]'
+        filters = [f'[0:v]{vf}[v]', f'{audio_label}loudnorm=I=-18:TP=-2:LRA=7,aresample=48000,asplit=2[voice][key]']
         music_labels = []
         for m in self.c.get('music', []):
             start, end = max(m['start'], offset), min(m['end'], offset + total)
@@ -1108,7 +1149,7 @@ class Project:
                         '[voice][duck]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.89:level=false:latency=true[a]']
         else:
             filters += ['[key]anullsink', '[voice]anull[a]']
-        final = self.cached('final', [file_hash(joined), file_hash(srt), self.c['music'], self.c.get('mix', {}),
+        final = self.cached('final', [file_hash(visual_source), file_hash(joined), actual_renderer, file_hash(srt), self.c['music'], self.c.get('mix', {}),
                                     [self.asset(m['path']) for m in self.c['music']], self.c['subtitles'], offset], '.mp4',
                             lambda p: self.ff(args + ['-filter_complex', ';'.join(filters), '-map', '[v]', '-map', '[a]',
                                                      '-t', total, '-r', fps, '-c:v', 'libx264', '-preset', 'fast', '-crf', '19',
@@ -1128,6 +1169,9 @@ class Project:
         self.state[stage + '_render'] = {'fingerprint': self.demo_key() if stage == 'demo' else
                                         digest({'config': self.c, 'storyboard': self.storyboard_key()}),
                                         'sha256': file_hash(artifact), 'frames': cursor, 'cache': self.stats}
+        write_json(destination / (stage + '-renderer.json'), {'requested_renderer': renderer['engine'],
+                                                               'actual_renderer': actual_renderer,
+                                                               'fallback': renderer['fallback']})
         write_json(self.state_path, self.state)
         report = self.verify(stage)
         print(json.dumps({'artifact': str(artifact), 'cache': self.stats, 'verification': report}, ensure_ascii=False))
@@ -1240,6 +1284,7 @@ def initialize(path, source):
                                            'max_tempo': 1.12, 'min_units': 6}},
                        'subtitles': {'enabled': True, 'font': 'Microsoft YaHei', 'size': 48, 'min_size': 28, 'max_width_ratio': 0.88, 'margin': 30, 'max_chars': 24},
                        'motion': {'easing': 'smoothstep', 'max_zoom': 0.06},
+                       'renderer': {'engine': 'ffmpeg', 'fallback': 'ffmpeg'},
                        'video_generation': {
                            'enabled': False, 'provider': 'skyreels_v2',
                            'profile': 'balanced', 'runtime': {'type': 'auto'},
@@ -1270,7 +1315,7 @@ def main():
     parser.add_argument('--provider', help='Generated-video provider filter')
     parser.add_argument('--results', help='Generated output directory or ZIP for video-import')
     parser.add_argument('--jobs', help='video_jobs.json for video-import')
-    for option in ('python', 'nltk-data', 'hf-home', 'hf-hub-cache', 'transformers-cache'):
+    for option in ('python', 'node', 'browser', 'nltk-data', 'hf-home', 'hf-hub-cache', 'transformers-cache'):
         parser.add_argument('--' + option, help='User-selected path (configure only)')
     parser.add_argument('--offline', choices=['true', 'false'], help='Model cache offline mode (configure only)')
     args = parser.parse_args()
@@ -1283,7 +1328,7 @@ def main():
         print(json.dumps(path_report(args.project, runtime_config), ensure_ascii=False, indent=2))
         return
     if args.command == 'configure':
-        selected = {key: getattr(args, key) for key in ('python', 'ffmpeg', 'nltk_data', 'hf_home', 'hf_hub_cache', 'transformers_cache') if getattr(args, key)}
+        selected = {key: getattr(args, key) for key in ('python', 'ffmpeg', 'node', 'browser', 'nltk_data', 'hf_home', 'hf_hub_cache', 'transformers_cache') if getattr(args, key)}
         updated = update_config(runtime_config, selected)
         if args.offline is not None:
             updated['offline'] = args.offline == 'true'
@@ -1293,7 +1338,7 @@ def main():
         print('Saved user-selected runtime paths. Run preflight before drafting script or production plans.')
         return
     if args.command == 'remember-runtime':
-        selected = {key: runtime_config[key] for key in ('python', 'ffmpeg', 'nltk_data', 'hf_home',
+        selected = {key: runtime_config[key] for key in ('python', 'ffmpeg', 'node', 'browser', 'nltk_data', 'hf_home',
                                                          'hf_hub_cache', 'transformers_cache')
                     if key in runtime_config}
         if not selected:

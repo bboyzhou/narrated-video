@@ -12,11 +12,14 @@ import wave
 
 ENV_PATHS = {'nltk_data': 'NLTK_DATA', 'hf_home': 'HF_HOME',
              'hf_hub_cache': 'HF_HUB_CACHE', 'transformers_cache': 'TRANSFORMERS_CACHE'}
-PATH_KEYS = ('python', 'ffmpeg', *ENV_PATHS)
+PATH_KEYS = ('python', 'ffmpeg', 'node', 'browser', *ENV_PATHS)
+EXECUTABLE_KEYS = ('python', 'ffmpeg', 'node', 'browser')
 PROFILE_KEYS = PATH_KEYS
 ENV_CANDIDATES = {
     'python': ('NARRATED_VIDEO_MELOTTS_PYTHON',),
     'ffmpeg': ('NARRATED_VIDEO_FFMPEG', 'FFMPEG'),
+    'node': ('NARRATED_VIDEO_NODE', 'NODE'),
+    'browser': ('NARRATED_VIDEO_BROWSER',),
     **{key: (variable,) for key, variable in ENV_PATHS.items()},
 }
 
@@ -87,7 +90,7 @@ def resolve_paths(project, config, include_global=True, include_environment=True
 
 def validate_paths(paths):
     for key, value in paths.items():
-        valid = Path(value).is_file() if key in ('python', 'ffmpeg') else Path(value).is_dir()
+        valid = Path(value).is_file() if key in EXECUTABLE_KEYS else Path(value).is_dir()
         if not valid:
             raise ValueError(f'runtime.{key} path unavailable: {value}; select an existing path, no automatic fallback')
 
@@ -143,6 +146,7 @@ def path_report(project, config):
                                'values': read_global_runtime()},
             'candidates': {'current_python': sys.executable, 'path_python': shutil.which('python'),
                            'path_python3': shutil.which('python3'), 'path_ffmpeg': shutil.which('ffmpeg'),
+                           'path_node': shutil.which('node'), 'path_browser': shutil.which('chrome') or shutil.which('msedge'),
                            **{name: os.environ.get(name) for names in ENV_CANDIDATES.values() for name in names}},
             'note': 'Candidates only. Ask the user to select paths before configuring or remembering a runtime; not a whole-disk search.'}
 

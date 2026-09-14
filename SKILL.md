@@ -13,6 +13,7 @@ description: 将对话文案或本地文本制作成图片运镜解说视频，�
 - I2V 的 `profile` 只表达速度、质量与成本意图，统一使用 `smoke/fast/balanced/quality/max_quality`；`provider` 只表示模型或服务，`runtime` 只表示运行位置。dtype、帧数、steps、offload、attention、TeaCache 与 world size 全部由 Provider Planner 根据实际 Hardware 生成 `RuntimePlan`，不能写入 Profile 或 Job。
 - 外部生成失败只能影响当前镜头。结果缺失、损坏、缓存键失配、OOM 或 Worker 被杀时，保留失败记录并继续使用批准的 fallback；不要让整部 narrated-video 失败。
 - Kaggle 运行时必须可审计、可离线复现：固定模型/源码/依赖版本，显式模型路径，启动前预检；不要依赖启动时联网或全盘模糊搜索。
+- Remotion 是可选 Renderer Adapter，不是第二套内容协议：与 FFmpeg 共用 Render Plan、资产哈希、时间线和验证；首版只负责视觉，音频混音与最终封装继续由 FFmpeg 完成。Remotion 依赖和浏览器版本必须固定，`runtime.node`/`runtime.browser` 必须指向用户已选择的现有可执行文件，禁止渲染时自动下载浏览器。
 
 **生成式视频任务的反模式：** 不要使用 `skyreels_v2_kaggle` 这类 Provider/Runtime 组合名，不要创建 `t4_fp16_fast` 这类硬件绑定 Profile，不要让 Job 覆盖模型底层参数，不要在 Worker 内选择 Provider/Profile/Runtime 或猜测 GPU。不要每镜头启动一个完整模型进程，不要在 CUDA OOM 后复用同一 Python 进程重试，不要使用未固定的 `main/latest` 权重。
 
@@ -28,6 +29,7 @@ description: 将对话文案或本地文本制作成图片运镜解说视频，�
 |---|---|
 | 初始化、分句、镜头配置、渲染及验证 | [项目配置和命令](references/project.md) |
 | 动态素材叠加、视频镜头、关键帧和离线素材库 | [动态素材合成](references/composition.md) |
+| Remotion Renderer Adapter、Render Plan 和浏览器门禁 | [Remotion 渲染](references/remotion.md) |
 | I2V Provider、Runtime、Hardware、任务包、缓存和结果导入 | [生成式视频](references/generated-video.md) |
 | 通用 Profile、RuntimePlan、Registry、Worker 与迁移规则 | [I2V Provider 架构](references/i2v-provider-architecture.md) |
 | 文生视频/图生视频 provider 对比与测试 | [视频 provider 测试矩阵](references/video-provider-matrix.md) |
@@ -63,6 +65,7 @@ description: 将对话文案或本地文本制作成图片运镜解说视频，�
 - 初始化后、提出任何文案或制作方案前，先列出发现的软件/资源候选完整路径、用途和检查结果，让用户选择配音方式并运行 `preflight`；即使一个候选也不代选，除非用户已经明确选定。可一次选择整套环境，包括 MeloTTS Python、FFmpeg、NLTK 资源和模型缓存。将选择保存到项目 `runtime`；通过 `preflight` 后，只有在用户明确同意时才运行 `remember-runtime` 保存到跨平台用户级运行环境，后续项目和 Agent 会话直接复用；路径失效或要求切换时再选择。
 - 使用已有 WAV 时只需 Python 和 FFmpeg；MeloTTS 需要包含它的 Python、NLTK 与模型缓存。具体字段及 `paths/configure/doctor/preflight/remember-runtime` 用法见运行环境参考。`doctor` 是轻量诊断，不能代替制作前 `preflight`。找不到组件只说明当前搜索路径不可用，先核对解释器和已有资源目录，不直接判断本机未安装。
 - 不自动安装依赖、字体或下载模型，不为排查路径关闭网络安全检查。Runtime 的首次 `smoke` 可在用户授权且 manifest 明确允许联网时做一次可审计 bootstrap；成功后固定依赖与模型版本并切回离线运行。新增依赖/资源需相应授权。
+- 项目设置 `renderer.engine: remotion` 时，先确认 `runtime.node`、`runtime.browser` 和 `renderers/remotion/package-lock.json` 可用，再运行 Remotion smoke；缺少浏览器、依赖或 bundle 时按项目 `renderer.fallback` 回退 FFmpeg，并在报告中记录 `requested_renderer`、`actual_renderer` 和原因。
 - 优先用用户素材，缺图时使用可用的 imagegen 技能/工具，分镜批准后先生成 Demo 所需部分，并保持人物、美术、道具、场景和画幅连续。工具不可用时说明缺失项，不替换成无关素材。风格描述需落实为分镜、素材和具体参数，不声称仅填写 style 就会改变声音或图像。
 - 配音按句生成或使用每句 PCM WAV，并依次进行逐句响度归一化（目标约 -20 LUFS、真峰值 -2 dB、句内动态归一化）与可选的 `pacing.rate` 软语速归一化，以减少不同句子忽强忽快；语速按有效发声区间估算，只对超出目标容差的句子施加有界 `atempo`，短句和显式 `rate_policy: preserve` 句只报告不调整。保留原始停顿，不裁掉句首句尾。为避免 CosyVoice 句间切换过急，可在项目中加入 `pacing`：按语义为普通句、续接、对话/强调、切镜和结尾设置句尾停顿，并允许单句 `pause_after`/`pause_role` 覆盖。`respect_existing_tail` 默认开启，只补足现有尾部静音，不重复叠加已有 MeloTTS 停顿；字幕默认在讲话结束时结束，不覆盖纯停顿。以处理后真实样本时长对齐视频帧。整段录音先取得可靠分句边界再切分，不能用字数推算时间。字幕换行使用近似字形宽度并优先在标点处断行；`max_chars` 是 720p 可读性目标，不是盲切位置。`size` 是字号上限，脚本依据输出宽度、安全区和最长字幕行自动拟合，并受 `min_size` 保护；面向手机的 720p 项目可将上限设为 48px。每次渲染后检查 SRT 是否落在对应音频和镜头内、句间是否意外重叠或留空，并在首、中、尾及每个切镜点抽帧检查字幕安全区、对比度、字号和两行以内可读性；Demo 未通过这项人工检查前不得交给用户确认。
 - 图片提示词、来源及音乐许可/署名记入素材清单。音乐候选试听记录、用户选择原话、下载地址、文件哈希和许可写入 `music-selection.json`；只有批准候选才进入 `audio/music/` 和项目 `music` 数组。音乐混音默认按约 0.22 线性增益起步，并保留配音 sidechain ducking；渲染验证会报告来源平均响度、配置增益及低音量警告，不能仅凭视频解码通过判断配乐可听。支持多段音乐和淡入淡出；许可不明时不声称可商用。图片生成、联网查资料/找音乐和语音对齐由 agent 使用现有工具完成，脚本没有这些自动适配器。

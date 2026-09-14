@@ -1,0 +1,12 @@
+{
+  "name": "narrated-video-remotion-renderer",
+  "private": true,
+  "type": "module",
+  "engines": {"node": ">=18"},
+  "scripts": {"render": "node scripts/render.mjs"},
+  "dependencies": {
+    "@remotion/bundler": "4.0.524",
+    "@remotion/renderer": "4.0.524",
+    "remotion": "4.0.524"
+  }
+}
