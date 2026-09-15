@@ -20,9 +20,11 @@ import unicodedata
 import wave
 from runtime import (resolve_paths, validate_paths, relaunch, path_report, doctor,
                      update_config, write_global_runtime)
-from composition import resolve_asset, validate_layers, render_args
+from composition import resolve_asset, validate_layers
 from generators import (build_video_job, file_sha256 as generated_file_sha256,
                         normalize_provider, provider_for_plan, validate_video_policy)
+from narrated_project import (load_project, migrate_project, runtime_config_for,
+                              save_runtime_config)
 
 VERSION = 1
 
@@ -359,6 +361,9 @@ def preflight_fingerprint(project, config, ffmpeg_override=None):
                    'runtime': {**runtime_config, **paths},
                    'python': _executable_identity(paths.get('python') or sys.executable),
                    'ffmpeg': _executable_identity(ffmpeg),
+                   'renderer': config.get('renderer', {}),
+                   'node': _executable_identity(paths.get('node')),
+                   'browser': _executable_identity(paths.get('browser')),
                    'voice': config.get('voice', {})})
 
 
@@ -366,7 +371,8 @@ class Project:
     def __init__(self, path, ffmpeg=None, validation_stage='production'):
         self.path = Path(path).resolve()
         self.root = self.path.parent
-        self.c = read_json(self.path)
+        self.document = load_project(self.path)
+        self.c = self.document.legacy_view()
         self.work = self.root / '.narrated-video'
         self.cache = self.work / 'cache'
         self.state_path = self.work / 'state.json'
@@ -404,12 +410,16 @@ class Project:
 
     def validate_storyboard(self):
         c = self.c
-        value = c.get('storyboard')
-        require(isinstance(value, str) and value.strip(),
-                'Project needs storyboard path; prepare a production brief and shot plan before Demo production')
-        self.storyboard_path = self.path_for(value)
-        require(self.storyboard_path.is_file(), 'Storyboard file missing: ' + str(self.storyboard_path))
-        self.storyboard = read_json(self.storyboard_path)
+        if self.document.source_format == 'v1':
+            self.storyboard_path = self.path
+            self.storyboard = self.document.storyboard_view()
+        else:
+            value = c.get('storyboard')
+            require(isinstance(value, str) and value.strip(),
+                    'Project needs storyboard path; prepare a production brief and shot plan before Demo production')
+            self.storyboard_path = self.path_for(value)
+            require(self.storyboard_path.is_file(), 'Storyboard file missing: ' + str(self.storyboard_path))
+            self.storyboard = read_json(self.storyboard_path)
         require(self.storyboard.get('version') == 1, 'Unsupported storyboard version')
 
         brief = self.storyboard.get('creative_brief')
@@ -464,7 +474,7 @@ class Project:
                     shot_id + ': project prompt must match the approved storyboard prompt')
             require(shot.get('negative_prompt') == plan['negative_prompt'],
                     shot_id + ': project negative_prompt must match the approved storyboard')
-            for key, default in (('layers', []), ('type', 'image'), ('source_start', 0), ('loop', False)):
+            for key, default in (('layers', []), ('type', 'image'), ('source_start', 0), ('loop', False), ('graphics', []), ('effects', {})):
                 require(plan.get(key, default) == shot.get(key, default),
                         shot_id + ': storyboard ' + key + ' must match project shot')
 
@@ -480,6 +490,8 @@ class Project:
     def validate(self, validation_stage='production'):
         c = self.c
         require(validation_stage in ('script', 'production'), 'Unknown validation stage')
+        if self.document.source_format == 'v1':
+            self.document.validate(validation_stage)
         require(c.get('version') == VERSION, 'Unsupported project version')
         self.output = c['output']
         self.fps = self.output['fps']
@@ -663,7 +675,7 @@ class Project:
     def storyboard_execution(self, shot_ids=None):
         ids = set(shot_ids) if shot_ids is not None else None
         return [{key: shot.get(key) for key in ('id', 'type', 'narration', 'motion', 'transition',
-                                                 'prompt', 'negative_prompt', 'layers', 'source_start', 'loop')}
+                                                 'prompt', 'negative_prompt', 'layers', 'source_start', 'loop', 'graphics', 'effects')}
                 for shot in self.c['shots'] if ids is None or shot['id'] in ids]
 
     def storyboard_key(self):
@@ -713,21 +725,72 @@ class Project:
         config = self.c.get('renderer', {})
         require(isinstance(config, dict), 'renderer must be an object')
         engine = config.get('engine', 'ffmpeg')
-        require(engine in ('ffmpeg', 'remotion'), 'renderer.engine must be ffmpeg or remotion')
+        require(engine in ('ffmpeg', 'remotion', 'openchatcut'),
+                'renderer.engine must be ffmpeg, remotion or openchatcut')
         fallback = config.get('fallback', 'ffmpeg')
-        require(fallback in ('ffmpeg', 'none'), 'renderer.fallback must be ffmpeg or none')
+        require(fallback in ('ffmpeg', 'remotion', 'openchatcut', 'none'),
+                'renderer.fallback must name an adapter or none')
+        enhanced = any(s.get('graphics') or s.get('effects') or any(l.get('depth') for l in s.get('layers', [])) for s in self.c.get('shots', []))
+        require(not enhanced or (engine in ('remotion', 'openchatcut') and fallback == 'none'),
+                'Graphics/effects/parallax require a capable adapter with fallback=none')
         return {'engine': engine, 'fallback': fallback}
 
     def build_render_plan(self, stage, selected, voices, timeline):
-        from remotion_adapter import build_render_plan
-        plan = build_render_plan(self, stage, selected, voices, timeline)
+        from narrated_project.compiler import compile_render_plan
+        plan = compile_render_plan(self, stage, selected, voices, timeline)
         destination = self.root / 'deliverables'
         destination.mkdir(exist_ok=True)
         target = destination / (stage + '-render-plan.json')
         write_json(target, plan)
         return target
 
+    def build_timeline(self, selected, voices):
+        timeline = []
+        cursor = 0
+        for shot in selected:
+            for sentence_id in shot['narration']:
+                info = voices[sentence_id]
+                timeline.append({
+                    'id': sentence_id,
+                    'shot': shot['id'],
+                    'text': self.sentences[sentence_id]['text'],
+                    'start_frame': cursor,
+                    'end_frame': cursor + info['frames'],
+                    'subtitle_end_frame': cursor + info.get('speech_frames', info['frames']),
+                    'audio_duration': info['duration'],
+                    'speech_duration': info.get('speech_duration', info['duration']),
+                    'pause_seconds': info.get('pause_seconds', 0.0),
+                    'rate': info.get('rate', {}),
+                })
+                cursor += info['frames']
+        return timeline
+
+    def build_voice_track(self, timeline, voices):
+        args = []
+        filters = []
+        labels = []
+        cache_inputs = []
+        for index, row in enumerate(timeline):
+            info = voices[row['id']]
+            args += ['-i', info['path']]
+            filters.append(
+                f'[{index}:a]aresample=48000,aformat=channel_layouts=stereo,'
+                f'apad,atrim=duration={info["frames"]/self.fps},asetpts=PTS-STARTPTS[a{index}]')
+            labels.append(f'[a{index}]')
+            cache_inputs.append([info['sha256'], info['frames']])
+        filters.append(''.join(labels) + f'concat=n={len(labels)}:v=0:a=1[a]')
+        return self.cached(
+            'narration-track',
+            cache_inputs,
+            '.wav',
+            lambda target: self.ff(args + [
+                '-filter_complex', ';'.join(filters), '-map', '[a]',
+                '-c:a', 'pcm_s16le', '-ar', '48000', '-ac', '2', target,
+            ]),
+        )
+
     def demo_key(self):
+        from adapters import adapter_identity
         shots = self.selected('demo')
         voices = []
         for shot in shots:
@@ -753,7 +816,9 @@ class Project:
                        'mix': self.c.get('mix', {}),
                        'renderer': self.c.get('renderer', {}),
                        'runtime': {**self.c.get('runtime', {}), **self.runtime},
-                       'renderer': [file_hash(__file__), file_hash(Path(__file__).with_name('runtime.py')),
+                       'alignment': [self.asset(self.sentences[sid]['alignment']) for shot in shots for sid in shot['narration'] if self.sentences[sid].get('alignment')],
+                       'adapter_code': adapter_identity(self.renderer_config()['engine']),
+                       'pipeline_code': [file_hash(__file__), file_hash(Path(__file__).with_name('runtime.py')),
                                     file_hash(Path(__file__).with_name('composition.py'))]})
 
     def gate(self, stage):
@@ -996,185 +1061,182 @@ class Project:
         return result
 
     def render(self, stage):
+        """Compile once, render visuals through an adapter, then mix audio centrally."""
         self.gate(stage)
         selected = self.resolved_selected(stage)
         for shot in selected:
             for media in [shot, *shot.get('layers', [])]:
                 require(self.path_for(media['asset']).is_file(), 'Missing media: ' + media['asset'])
-        for m in self.c.get('music', []):
-            require(self.path_for(m['path']).is_file(), 'Missing music: ' + m['path'])
-        if any(s['type'] == 'video' or s.get('layers') for s in selected):
-            available = self.ff(['-filters']).stdout
-            for name in ('overlay', 'scale', 'pad', 'rotate', 'geq', 'tpad', 'fps'):
-                require(re.search(r'\b' + name + r'\b', available), 'FFmpeg lacks composition filter: ' + name)
-            checked = set()
-            for shot in selected:
-                for media in [shot, *shot.get('layers', [])]:
-                    if media['type'] != 'video':
-                        continue
-                    source = self.path_for(media['asset'])
-                    offset = media.get('source_start', 0)
-                    if (source, offset) in checked:
-                        continue
-                    probe = self.ff(['-ss', offset, '-i', source, '-map', '0:v:0', '-frames:v', 1,
-                                     '-progress', 'pipe:1', '-f', 'null', '-'])
-                    require(any(int(n) > 0 for n in re.findall(r'^frame=(\d+)', probe.stdout, re.MULTILINE)),
-                            'No decodable video frame at source_start: ' + str(source))
-                    checked.add((source, offset))
+        for music in self.c.get('music', []):
+            require(self.path_for(music['path']).is_file(), 'Missing music: ' + music['path'])
+
         voices = self.voices(stage)
-        w, h, fps = self.output['width'], self.output['height'], self.fps
-        durations = [sum(voices[s]['frames'] for s in shot['narration']) for shot in selected]
-        tails = [round(s.get('transition', 0.3) * fps) if i + 1 < len(selected) else 0 for i, s in enumerate(selected)]
-        for i, t in enumerate(tails[:-1]):
-            require(t < min(durations[i], durations[i + 1]), 'Transition must be shorter than both neighboring shots')
-        raw = []
-        for i, shot in enumerate(selected):
-            validate_layers(shot, durations[i] / fps)
-            image = self.path_for(shot['asset'])
-            n = durations[i] + tails[i]
-            motion_cfg = self.c.get('motion', {})
-            motion = shot.get('motion', 'push')
-            vf = motion_filter(w, h, n, motion,
-                               motion_cfg.get('easing', 'smoothstep'),
-                               float(motion_cfg.get('max_zoom', 0.06)))
-            if shot['type'] == 'video' or shot.get('layers'):
-                args = render_args(shot, self.path_for, w, h, fps, n, vf)
-                raw.append(self.cached('composition', [self.asset(shot['asset']), shot,
-                                       self.layer_assets([shot]), w, h, fps, n, vf], '.mp4',
-                                       lambda p, args=args: self.ff([*args, p])))
-            else:
-                raw.append(self.cached('image-motion', [file_hash(image), vf, fps, n], '.mp4',
-                                       lambda p, image=image, vf=vf, n=n: self.ff(['-loop', '1', '-framerate', str(fps), '-i', image, '-vf', vf, '-frames:v', n, '-an', '-c:v', 'libx264', '-preset', 'fast', '-crf', '19', '-pix_fmt', 'yuv420p', p])))
-        clips = []
-        timeline = []
-        cursor = 0
-        for i, shot in enumerate(selected):
-            n = durations[i]
-            inputs = [file_hash(raw[i]), n, [voices[s]['sha256'] for s in shot['narration']]]
-            transition = tails[i - 1] if i else 0
-            if transition:
-                inputs.extend([file_hash(raw[i - 1]), transition])
-            def segment(target, i=i, shot=shot, n=n, transition=transition):
-                args = ['-filter_complex_threads', '1', '-i', raw[i]]
-                filters = []
-                if transition:
-                    args += ['-ss', durations[i-1] / fps, '-i', raw[i-1]]
-                    filters += ['[1:v]settb=AVTB,setpts=PTS-STARTPTS[prev]', '[0:v]settb=AVTB,setpts=PTS-STARTPTS[cur]',
-                                f'[prev][cur]xfade=transition=fade:duration={transition/fps}:offset=0,trim=duration={n/fps},setpts=PTS-STARTPTS[v]']
-                else:
-                    filters += [f'[0:v]trim=duration={n/fps},setpts=PTS-STARTPTS[v]']
-                audio_indices = []
-                base = 2 if transition else 1
-                for j, sid in enumerate(shot['narration']):
-                    info = voices[sid]
-                    args += ['-i', info['path']]
-                    filters += [f'[{base+j}:a]aresample=48000,aformat=channel_layouts=stereo,apad,atrim=duration={info["frames"]/fps},asetpts=PTS-STARTPTS[a{j}]']
-                    audio_indices.append(f'[a{j}]')
-                filters += [''.join(audio_indices) + f'concat=n={len(audio_indices)}:v=0:a=1[a]']
-                self.ff(args + ['-filter_complex', ';'.join(filters), '-map', '[v]', '-map', '[a]', '-t', n/fps,
-                                '-c:v', 'libx264', '-preset', 'fast', '-crf', '19', '-pix_fmt', 'yuv420p', '-c:a', 'pcm_s16le', target])
-            clips.append(self.cached('segment', inputs, '.mkv', segment))
-            for sid in shot['narration']:
-                info = voices[sid]
-                timeline.append({'id': sid, 'shot': shot['id'], 'text': self.sentences[sid]['text'],
-                                 'start_frame': cursor, 'end_frame': cursor + info['frames'],
-                                 'subtitle_end_frame': cursor + info.get('speech_frames', info['frames']),
-                                 'audio_duration': info['duration'],
-                                 'speech_duration': info.get('speech_duration', info['duration']),
-                                 'pause_seconds': info.get('pause_seconds', 0.0),
-                                 'rate': info.get('rate', {})})
-                cursor += info['frames']
-        # Cache paths contain only hashes, avoiding concat-demuxer path escaping.
-        listing = self.cache / 'assembly.txt'
-        listing.write_text('\n'.join("file '" + p.name + "'" for p in clips) + '\n', encoding='utf-8')
-        joined = self.cached('assembly', [file_hash(p) for p in clips], '.mkv',
-                             lambda p: self.ff(['-f', 'concat', '-safe', '0', '-i', listing, '-c', 'copy', p]))
+        timeline = self.build_timeline(selected, voices)
+        total_frames = timeline[-1]['end_frame']
+        total = total_frames / self.fps
+        for index, shot in enumerate(selected[:-1]):
+            transition = round(shot.get('transition', 0.3) * self.fps)
+            current_frames = sum(voices[sid]['frames'] for sid in shot['narration'])
+            next_frames = sum(voices[sid]['frames'] for sid in selected[index + 1]['narration'])
+            require(transition < min(current_frames, next_frames),
+                    'Transition must be shorter than both neighboring shots')
+
+        plan_path = self.build_render_plan(stage, selected, voices, timeline)
+        plan = read_json(plan_path)
+        renderer = self.renderer_config()
+        requested_adapter = renderer['engine']
+        actual_adapter = requested_adapter
+        fallback_reason = None
+        from adapters import get_adapter
+
+        def execute(name):
+            adapter = get_adapter(name)
+            return adapter.render(
+                plan,
+                self.cache / (stage + '-' + name + '-visual.mp4'),
+                self,
+            )
+
+        try:
+            visual_source = execute(requested_adapter)
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+            fallback = renderer['fallback']
+            if fallback == 'none' or fallback == requested_adapter:
+                raise
+            fallback_reason = str(error)
+            actual_adapter = fallback
+            print(
+                'WARNING: ' + requested_adapter + ' unavailable; falling back to ' +
+                fallback + ': ' + fallback_reason,
+                file=sys.stderr,
+            )
+            visual_source = execute(fallback)
+
         destination = self.root / 'deliverables'
         destination.mkdir(exist_ok=True)
         srt = destination / (stage + '.srt')
         srt.write_text(self.subtitles(timeline), encoding='utf-8')
         shutil.copyfile(srt, self.cache / 'captions.srt')
-        total = cursor / fps
-        # Music is indexed on the full timeline, including a Demo from the middle.
+        voice_track = self.build_voice_track(timeline, voices)
+
         offset = 0
         if stage == 'demo' and selected[0]['id'] != self.c['shots'][0]['id']:
-            require('start_seconds' in self.c['demo'], 'Middle Demo requires demo.start_seconds for music placement')
+            require('start_seconds' in self.c['demo'],
+                    'Middle Demo requires demo.start_seconds for music placement')
             offset = self.c['demo']['start_seconds']
-        renderer = self.renderer_config()
-        visual_source = joined
-        actual_renderer = 'ffmpeg'
-        if renderer['engine'] == 'remotion':
-            plan_path = self.build_render_plan(stage, selected, voices, timeline)
-            remotion_output = self.cache / (digest({'plan': file_hash(plan_path), 'renderer': 'remotion'}) + '.mp4')
-            try:
-                from remotion_adapter import render as render_remotion
-                render_remotion(plan_path, remotion_output,
-                                self.runtime.get('node') or os.environ.get('NODE') or 'node')
-                visual_source = remotion_output
-                actual_renderer = 'remotion'
-            except (OSError, RuntimeError) as error:
-                if renderer['fallback'] != 'ffmpeg':
-                    raise
-                print('WARNING: Remotion unavailable; falling back to FFmpeg: ' + str(error), file=sys.stderr)
-        args = ['-filter_complex_threads', '1', '-i', visual_source]
-        if visual_source != joined:
-            audio_only = self.cached('audio-track', [file_hash(joined)], '.wav',
-                                     lambda p: self.ff(['-i', joined, '-vn', '-c:a', 'pcm_s16le', '-ar', '48000', '-ac', '2', p]))
-            args += ['-i', audio_only]
+
+        args = ['-filter_complex_threads', '1', '-i', visual_source, '-i', voice_track]
         sub = self.c['subtitles']
         mix = self.c.get('mix', {})
-        size = self._subtitle_effective_size * h / 720
-        # SRT rendering uses libass PlayResY=288; convert pixel target to ASS units.
-        vf = f"subtitles=filename=captions.srt:force_style='FontName={sub['font']},FontSize={size*288/h},Outline=1,Shadow=0,Alignment=2,MarginV={sub.get('margin', 28)*288/720}'" if sub.get('enabled', True) else 'null'
-        audio_label = '[1:a]' if visual_source != joined else '[0:a]'
-        filters = [f'[0:v]{vf}[v]', f'{audio_label}loudnorm=I=-18:TP=-2:LRA=7,aresample=48000,asplit=2[voice][key]']
+        height = self.output['height']
+        size = self._subtitle_effective_size * height / 720
+        visual_filter = (
+            f"subtitles=filename=captions.srt:force_style='FontName={sub['font']},"
+            f"FontSize={size*288/height},Outline=1,Shadow=0,Alignment=2,"
+            f"MarginV={sub.get('margin', 28)*288/720}'"
+            if sub.get('enabled', True) else 'null'
+        )
+        filters = [
+            f'[0:v]{visual_filter}[v]',
+            '[1:a]loudnorm=I=-18:TP=-2:LRA=7,aresample=48000,asplit=2[voice][key]',
+        ]
         music_labels = []
-        for m in self.c.get('music', []):
-            start, end = max(m['start'], offset), min(m['end'], offset + total)
+        for music in self.c.get('music', []):
+            start, end = max(music['start'], offset), min(music['end'], offset + total)
             if end <= start:
                 continue
-            idx = len(music_labels) + 1
-            args += ['-stream_loop', '-1', '-i', self.path_for(m['path'])]
-            length = m['end'] - m['start']
-            fi, fo = min(m.get('fade_in', 1), length), min(m.get('fade_out', 1), length)
-            track_volume = float(m.get('volume', .22))
+            input_index = len(music_labels) + 2
+            args += ['-stream_loop', '-1', '-i', self.path_for(music['path'])]
+            length = music['end'] - music['start']
+            fade_in = min(music.get('fade_in', 1), length)
+            fade_out = min(music.get('fade_out', 1), length)
+            volume = float(music.get('volume', .22))
             if mix.get('music_adaptive', True):
-                track_volume *= 10 ** ((float(mix.get('music_relative_db', -12)) + 12) / 20)
-            track_volume = min(max(track_volume, 0.0), 1.0)
-            filters += [f'[{idx}:a]aresample=48000,aformat=channel_layouts=stereo,atrim=duration={length},asetpts=PTS-STARTPTS,volume={track_volume},afade=t=in:d={fi},afade=t=out:st={length-fo}:d={fo},atrim=start={start-m["start"]}:end={end-m["start"]},asetpts=PTS-STARTPTS,adelay={round((start-offset)*1000)}:all=1,apad,atrim=duration={total}[m{idx}]']
-            music_labels.append(f'[m{idx}]')
+                volume *= 10 ** ((float(mix.get('music_relative_db', -12)) + 12) / 20)
+            volume = min(max(volume, 0.0), 1.0)
+            filters.append(
+                f'[{input_index}:a]aresample=48000,aformat=channel_layouts=stereo,'
+                f'atrim=duration={length},asetpts=PTS-STARTPTS,volume={volume},'
+                f'afade=t=in:d={fade_in},afade=t=out:st={length-fade_out}:d={fade_out},'
+                f'atrim=start={start-music["start"]}:end={end-music["start"]},'
+                f'asetpts=PTS-STARTPTS,adelay={round((start-offset)*1000)}:all=1,'
+                f'apad,atrim=duration={total}[m{input_index}]')
+            music_labels.append(f'[m{input_index}]')
         if music_labels:
-            filters += [''.join(music_labels) + f'amix=inputs={len(music_labels)}:normalize=0[music]',
-                        '[music][key]sidechaincompress=threshold=0.06:ratio=2:attack=15:release=400[duck]',
-                        '[voice][duck]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.89:level=false:latency=true[a]']
+            filters += [
+                ''.join(music_labels) +
+                f'amix=inputs={len(music_labels)}:normalize=0[music]',
+                '[music][key]sidechaincompress=threshold=0.06:ratio=2:'
+                'attack=15:release=400[duck]',
+                '[voice][duck]amix=inputs=2:duration=first:normalize=0,'
+                'alimiter=limit=0.89:level=false:latency=true[a]',
+            ]
         else:
             filters += ['[key]anullsink', '[voice]anull[a]']
-        final = self.cached('final', [file_hash(visual_source), file_hash(joined), actual_renderer, file_hash(srt), self.c['music'], self.c.get('mix', {}),
-                                    [self.asset(m['path']) for m in self.c['music']], self.c['subtitles'], offset], '.mp4',
-                            lambda p: self.ff(args + ['-filter_complex', ';'.join(filters), '-map', '[v]', '-map', '[a]',
-                                                     '-t', total, '-r', fps, '-c:v', 'libx264', '-preset', 'fast', '-crf', '19',
-                                                     '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-movflags', '+faststart', p], self.cache))
+
+        final = self.cached(
+            'final-v1',
+            [
+                file_hash(visual_source), file_hash(voice_track), actual_adapter,
+                file_hash(srt), self.c['music'], self.c.get('mix', {}),
+                [self.asset(music['path']) for music in self.c['music']],
+                self.c['subtitles'], offset,
+            ],
+            '.mp4',
+            lambda target: self.ff(args + [
+                '-filter_complex', ';'.join(filters), '-map', '[v]', '-map', '[a]',
+                '-t', total, '-r', self.fps, '-c:v', 'libx264', '-preset', 'fast',
+                '-crf', '19', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k',
+                '-ar', '48000', '-ac', '2', '-movflags', '+faststart', target,
+            ], self.cache),
+        )
         artifact = destination / (stage + '.mp4')
         shutil.copyfile(final, artifact)
-        write_json(destination / (stage + '-timeline.json'), {'fps': fps, 'total_frames': cursor, 'sentences': timeline})
-        write_json(destination / (stage + '-manifest.json'), {'images': [{**s, **self.asset(s['asset'])} for s in selected],
-                                                             'layers': self.layer_assets(selected),
-                                                             'audio': {sid: {**v, 'path': str(v['path'])} for sid, v in voices.items()},
-                                                             'music': [{**m, **self.asset(m['path'])} for m in self.c['music']]})
-        shutil.copyfile(self.path, destination / 'project.json')
+        write_json(destination / (stage + '-timeline.json'), {
+            'fps': self.fps, 'total_frames': total_frames, 'sentences': timeline,
+        })
+        write_json(destination / (stage + '-manifest.json'), {
+            'images': [{**shot, **self.asset(shot['asset'])} for shot in selected],
+            'layers': self.layer_assets(selected),
+            'audio': {
+                sentence_id: {**info, 'path': str(info['path'])}
+                for sentence_id, info in voices.items()
+            },
+            'music': [
+                {**music, **self.asset(music['path'])} for music in self.c['music']
+            ],
+        })
+        project_name = ('narrated-project.json'
+                        if self.document.source_format == 'v1' else 'project.json')
+        shutil.copyfile(self.path, destination / project_name)
         storyboard_copy = destination / 'storyboard.json'
-        if self.storyboard_path.resolve() != storyboard_copy.resolve():
+        if self.document.source_format == 'v1':
+            write_json(storyboard_copy, self.storyboard)
+        elif self.storyboard_path.resolve() != storyboard_copy.resolve():
             shutil.copyfile(self.storyboard_path, storyboard_copy)
-        write_json(destination / 'approvals.json', {k: self.state.get(k) for k in ('script', 'storyboard', 'demo')})
-        self.state[stage + '_render'] = {'fingerprint': self.demo_key() if stage == 'demo' else
-                                        digest({'config': self.c, 'storyboard': self.storyboard_key()}),
-                                        'sha256': file_hash(artifact), 'frames': cursor, 'cache': self.stats}
-        write_json(destination / (stage + '-renderer.json'), {'requested_renderer': renderer['engine'],
-                                                               'actual_renderer': actual_renderer,
-                                                               'fallback': renderer['fallback']})
+        write_json(destination / 'approvals.json', {
+            key: self.state.get(key) for key in ('script', 'storyboard', 'demo')
+        })
+        self.state[stage + '_render'] = {
+            'fingerprint': self.demo_key() if stage == 'demo' else
+                           digest({'config': self.c, 'storyboard': self.storyboard_key()}),
+            'sha256': file_hash(artifact),
+            'frames': total_frames,
+            'cache': self.stats,
+        }
+        write_json(destination / (stage + '-renderer.json'), {
+            'requested_adapter': requested_adapter,
+            'actual_adapter': actual_adapter,
+            'fallback': renderer['fallback'],
+            'fallback_reason': fallback_reason,
+            'requested_renderer': requested_adapter,
+            'actual_renderer': actual_adapter,
+        })
         write_json(self.state_path, self.state)
         report = self.verify(stage)
-        print(json.dumps({'artifact': str(artifact), 'cache': self.stats, 'verification': report}, ensure_ascii=False))
+        print(json.dumps({
+            'artifact': str(artifact), 'cache': self.stats, 'verification': report,
+        }, ensure_ascii=False))
 
     def subtitles(self, timeline):
         def stamp(frame):
@@ -1250,6 +1312,7 @@ class Project:
 
 
 def initialize(path, source):
+    """Create the legacy two-file fixture format for compatibility tests."""
     path = Path(path).resolve()
     require(not path.exists(), 'Project already exists; refusing to overwrite')
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1297,12 +1360,96 @@ def initialize(path, source):
     print('Created ' + str(path) + '; run preflight before drafting the spoken script or production plan.')
 
 
+def initialize_v1(path, source):
+    """Create a single-source NarratedProject v1 without runtime state."""
+    path = Path(path).resolve()
+    require(not path.exists(), 'Project already exists; refusing to overwrite')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    original = None
+    if source:
+        source = Path(source).resolve()
+        if source.is_dir():
+            candidates = [candidate for candidate in source.iterdir()
+                          if candidate.suffix.lower() in ('.md', '.txt') and candidate.is_file()]
+            require(len(candidates) == 1,
+                    'Source directory needs exactly one .txt/.md; otherwise select a file explicitly')
+            source = candidates[0]
+        saved = path.parent / ('source' + source.suffix)
+        require(not saved.exists(), 'Saved source already exists')
+        saved.write_text(source.read_text(encoding='utf-8-sig'), encoding='utf-8')
+        original = saved.name
+    project_id = re.sub(r'[^A-Za-z0-9_-]+', '-', path.parent.name).strip('-').lower()
+    value = {
+        '$schema': 'https://openai.local/narrated-video/narrated-project-v1.schema.json',
+        'kind': 'NarratedProject',
+        'version': 1,
+        'project': {'id': project_id or 'narrated-project', 'title': path.parent.name},
+        'sources': {
+            'script': 'approved-script.txt',
+            **({'original': original} if original else {}),
+        },
+        'creative': {
+            'brief': {
+                'audience': '', 'platform': '', 'purpose': '',
+                'target_duration_seconds': 60, 'narrative_arc': '',
+                'visual_style': '', 'pacing': '', 'voice_direction': '',
+                'music_direction': '', 'continuity_anchors': [], 'constraints': [],
+            },
+            'style': {'name': 'custom', 'visual': '', 'tone': ''},
+        },
+        'providers': {
+            'image': {'default': 'external', 'providers': {}},
+            'tts': {
+                'engine': 'melotts', 'language': 'ZH', 'speaker': 'ZH',
+                'device': 'cpu', 'speed': 1, 'revision': '1',
+            },
+            'i2v': {
+                'enabled': False, 'provider': 'skyreels_v2', 'profile': 'balanced',
+                'runtime': {'type': 'auto'}, 'policy': 'highlights',
+                'i2v_budget': {
+                    'enabled': True, 'max_shots': 3,
+                    'max_generated_seconds_per_shot': 4,
+                },
+                'providers': {},
+            },
+        },
+        'assets': {},
+        'timeline': {
+            'narration': [], 'shots': [],
+            'demo': {'shots': [], 'selection_reason': '', 'validation_goals': []},
+            'music': [],
+        },
+        'render': {
+            'target': {'adapter': 'ffmpeg', 'fallback': 'none'},
+            'output': {'width': 1280, 'height': 720, 'fps': 30},
+            'pacing': {
+                'pause_policy': 'none',
+                'rate': {
+                    'policy': 'soft', 'target_units_per_second': 4.5,
+                    'tolerance': 0.12, 'min_tempo': 0.88,
+                    'max_tempo': 1.12, 'min_units': 6,
+                },
+            },
+            'subtitles': {
+                'enabled': True, 'font': 'Microsoft YaHei', 'size': 48,
+                'min_size': 28, 'max_width_ratio': 0.88,
+                'margin': 30, 'max_chars': 24,
+            },
+            'motion': {'easing': 'smoothstep', 'max_zoom': 0.06},
+            'mix': {'music_adaptive': True, 'music_relative_db': -12},
+        },
+    }
+    write_json(path, value)
+    print('Created NarratedProject v1 at ' + str(path) +
+          '; select runtime paths and pass preflight before production planning.')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['init', 'paths', 'configure', 'remember-runtime',
+    parser.add_argument('command', choices=['init', 'migrate', 'paths', 'configure', 'remember-runtime',
                                             'doctor', 'preflight', 'check', 'record', 'tts',
                                             'render', 'verify', 'video-prepare', 'video-import',
-                                            'video-status'])
+                                            'video-status', 'alignment-prepare', 'adapter-export'])
     parser.add_argument('project', help='Project JSON path')
     parser.add_argument('--source', help='Input .txt/.md or directory (init only)')
     parser.add_argument('--stage', choices=['script', 'storyboard', 'demo', 'full'], default='demo')
@@ -1313,6 +1460,8 @@ def main():
     parser.add_argument('--output', help='video-prepare manifest output path')
     parser.add_argument('--bundle', help='video-prepare ZIP output path')
     parser.add_argument('--provider', help='Generated-video provider filter')
+    parser.add_argument('--adapter', choices=['openchatcut'],
+                        help='Editable-project adapter for adapter-export')
     parser.add_argument('--results', help='Generated output directory or ZIP for video-import')
     parser.add_argument('--jobs', help='video_jobs.json for video-import')
     for option in ('python', 'node', 'browser', 'nltk-data', 'hf-home', 'hf-hub-cache', 'transformers-cache'):
@@ -1320,10 +1469,20 @@ def main():
     parser.add_argument('--offline', choices=['true', 'false'], help='Model cache offline mode (configure only)')
     args = parser.parse_args()
     if args.command == 'init':
-        initialize(args.project, args.source)
+        initialize_v1(args.project, args.source)
         return
-    config = read_json(args.project)
-    runtime_config = config.get('runtime', {})
+    if args.command == 'migrate':
+        require(args.output, 'migrate requires --output beside the legacy project')
+        migrated = migrate_project(args.project, args.output)
+        print(json.dumps({
+            'source': str(Path(args.project).resolve()),
+            'project': str(migrated.path),
+            'kind': 'NarratedProject', 'version': 1,
+        }, ensure_ascii=False))
+        return
+    document = load_project(args.project)
+    config = document.legacy_view()
+    runtime_config = runtime_config_for(args.project, document.legacy_raw)
     if args.command == 'paths':
         print(json.dumps(path_report(args.project, runtime_config), ensure_ascii=False, indent=2))
         return
@@ -1333,8 +1492,7 @@ def main():
         if args.offline is not None:
             updated['offline'] = args.offline == 'true'
         validate_paths(resolve_paths(args.project, updated))
-        config['runtime'] = updated
-        write_json(args.project, config)
+        save_runtime_config(args.project, updated)
         print('Saved user-selected runtime paths. Run preflight before drafting script or production plans.')
         return
     if args.command == 'remember-runtime':
@@ -1355,6 +1513,11 @@ def main():
     if args.command in ('doctor', 'preflight'):
         report = doctor(args.project, runtime_config, config.get('voice', {}), args.ffmpeg,
                         deep=args.command == 'preflight')
+        if config.get('renderer', {}).get('engine') == 'remotion':
+            from remotion_adapter import preflight as remotion_preflight
+            detail = remotion_preflight(resolve_paths(args.project, runtime_config))
+            report['checks'].append({'name': 'remotion', **detail})
+            report['ok'] = report['ok'] and detail['ok']
         if args.command == 'preflight':
             report['fingerprint'] = preflight_fingerprint(args.project, config, args.ffmpeg)
             report['checked_at'] = time.strftime('%Y-%m-%dT%H:%M:%S%z')
@@ -1386,6 +1549,18 @@ def main():
         statuses = [project.generated_video_status(shot) for shot in project.selected(args.stage)]
         print(json.dumps({'stage': args.stage, 'generated_video': [row for row in statuses if row]},
                          ensure_ascii=False, indent=2))
+    elif args.command == 'adapter-export':
+        require(args.stage in ('demo', 'full'), 'adapter-export stage must be demo or full')
+        require(args.adapter == 'openchatcut', 'adapter-export currently requires --adapter openchatcut')
+        require(args.output, 'adapter-export requires --output')
+        project.gate(args.stage)
+        selected = project.resolved_selected(args.stage)
+        voices = project.voices(args.stage)
+        timeline = project.build_timeline(selected, voices)
+        plan_path = project.build_render_plan(args.stage, selected, voices, timeline)
+        from adapters import get_adapter
+        artifact = get_adapter(args.adapter).export(read_json(plan_path), args.output, project)
+        print(json.dumps({'adapter': args.adapter, 'artifact': str(artifact)}, ensure_ascii=False))
     elif args.command == 'check':
         project.require_preflight()
         audit = pronunciation_audit(config.get('narration', []))
@@ -1400,7 +1575,10 @@ def main():
         print('Recorded actual user reply for ' + args.stage)
     else:
         require(args.stage not in ('script', 'storyboard'), 'Use demo or full for media commands')
-        if args.command == 'tts':
+        if args.command == 'alignment-prepare':
+            from alignment import prepare_requests
+            print(json.dumps(prepare_requests(project, args.stage), ensure_ascii=False))
+        elif args.command == 'tts':
             print(json.dumps({k: {**v, 'path': str(v['path'])} for k,v in project.voices(args.stage).items()}, ensure_ascii=False))
         elif args.command == 'render':
             project.render(args.stage)

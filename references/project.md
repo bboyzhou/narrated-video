@@ -1,5 +1,9 @@
 # 项目配置及命令
 
+> 本文保留旧 `project.json + storyboard.json` 的兼容说明。新工程以
+> `schemas/narrated-project-v1.schema.json` 和 `skill/narrated-video/references/project-contract.md`
+> 为准；旧字段只通过兼容加载器读取，不再作为新增能力的协议入口。
+
 动态视频镜头、图片/视频图层、关键帧与离线素材库见 [动态素材合成](composition.md)。
 
 脚本位置：本 skill 的 `scripts/pipeline.py`。使用现有 Python 3.10+，仅标准库；渲染需要带 libx264、libass、xfade、loudnorm 的 FFmpeg。配音生成需要已有 MeloTTS 或 CosyVoice 原生推理环境；也可直接使用逐句 WAV。首次使用先由用户选择软件和资源路径，不自动安装包。

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from generators import (build_video_job, file_sha256, provider_for_plan,
                         validate_video_policy)
+from narrated_project import load_project
 
 
 def require(condition, message):
@@ -60,10 +61,16 @@ def _cache_hit(entry, project_root, provider, cache_key):
 def prepare_video_jobs(storyboard_path, project_path=None, stage='demo', output=None,
                        bundle=None, provider=None):
     storyboard_path = Path(storyboard_path).resolve()
-    storyboard = read_json(storyboard_path)
-    require(storyboard.get('version') == 1, 'Unsupported storyboard version')
     project_path = Path(project_path).resolve() if project_path else None
-    project = read_json(project_path) if project_path else {}
+    if project_path:
+        document = load_project(project_path)
+        project = document.legacy_view()
+        storyboard = (document.storyboard_view() if document.source_format == 'v1'
+                      else read_json(storyboard_path))
+    else:
+        storyboard = read_json(storyboard_path)
+        project = {}
+    require(storyboard.get('version') == 1, 'Unsupported storyboard version')
     project_root = project_path.parent if project_path else storyboard_path.parent
     project_shots = {shot['id']: shot for shot in project.get('shots', [])}
     selected_ids = None

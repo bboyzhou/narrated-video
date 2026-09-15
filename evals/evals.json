@@ -61,14 +61,14 @@
       "id": 9,
       "name": "wan-kaggle-demo-batch",
       "prompt": "这个历史解说项目的文案和完整分镜已批准。Demo 有两个动作重点镜头要用 Wan2.2 TI2V-5B，在 Kaggle 双 T4 上一次加载模型批量生成；其余镜头继续图片运镜。请准备任务包，失败时不要阻塞 Demo，也不要改掉原图片。",
-      "expected_output": "检查 storyboard 与批准门禁，为 wan22_kaggle 生成单个 Demo 批量任务包；缓存键覆盖模型版本、源图、motion prompt、seed 与推理参数；说明 Kaggle 实测限制。导入成功结果时保留项目镜头的图片 fallback，失败、缺失或损坏的输出继续使用图片运镜。",
+      "expected_output": "检查 NarratedProject 与批准门禁，为 provider=wan22、runtime=kaggle 生成单个 Demo 批量任务包；缓存键覆盖固定 Provider 配置、Profile、源图、motion prompt 与 seed，底层参数只写 RuntimePlan。导入成功结果时保留图片 fallback，失败、缺失或损坏输出继续使用图片运镜。",
       "files": []
     },
     {
       "id": 10,
       "name": "wan-single-t4-stable-baseline",
-      "prompt": "请按新的 Wan2.2 TI2V-5B + Kaggle 稳定方案准备这个生成式视频任务。先给出 smoke/standard/hd profile 和 preflight 门禁；第一阶段只使用单个 Worker、单张 T4、Diffusers、INT8/FP16 与离线固定依赖，不要启用 torchrun、world_size=2、FSDP 或第二张 GPU。",
-      "expected_output": "明确单卡稳定基线、profile 参数、资源预检和离线依赖要求，并将双卡/FSDP 标记为后续实验，而不是默认路径。",
+      "prompt": "请按 Wan2.2 TI2V-5B + Kaggle 稳定方案准备这个生成式视频任务。工程只选择 fast/balanced/quality 这类意图 Profile，不预先写死 T4、dtype、帧数或 offload；执行端探测实际硬件后再生成 RuntimePlan。",
+      "expected_output": "NarratedProject 只记录 provider=wan22、runtime=kaggle 和通用 Profile；实际 GPU、dtype、尺寸、帧数、steps、offload 与 world_size 由执行端探测并写入 RuntimePlan。未知硬件使用保守计划，不能把双卡显存合并推断。",
       "files": []
     },
     {
@@ -90,6 +90,41 @@
       "name": "wan-fallback-keeps-full-film",
       "prompt": "其中两个镜头需要 Wan 动作生成，但其中一个连续两次失败。请设计 narrated-video 的处理结果，确保 Demo 和最终全片仍能交付，并且不改变已批准的原图片和运镜。",
       "expected_output": "失败镜头保留失败记录并回退到批准的 image_motion 或本地视频；成功镜头可使用有效 MP4；生成结果不覆盖 fallback，整片继续渲染并报告降级。",
+      "files": []
+    },
+    {
+      "id": 14,
+      "name": "word-cues-stale-audio",
+      "prompt": "Demo已确认，现在把关键词所在句语速调快。能否继续沿用旧word-timestamps.json里的秒数？同一句出现两次‘关闭’，请只在第二次切状态。",
+      "expected_output": "检查最终逐句PCM与原文hash；拒绝旧时间戳，用字符区间区分重复词，重新对齐受影响句与事件；不从混音或字数猜测时间，受影响Demo批准失效。",
+      "files": []
+    },
+    {
+      "id": 15,
+      "name": "remotion-fallback-and-install-truth",
+      "prompt": "配置里写了Remotion，安装目录却只有SKILL.md和Python脚本；视频导出成功，粒子和公式消失了。请检查并说明实际能力。",
+      "expected_output": "检查安装renderer、依赖、实际renderer报告和fallback原因，不以配置或退出码断言使用Remotion；增强字段禁止静默降级。修复安装时先备份并同步能力包及hash清单，不宣称全量编辑器。",
+      "files": []
+    },
+    {
+      "id": 16,
+      "name": "animation-qa-not-container-only",
+      "prompt": "容器边界检查全过，但硬币经过概率条，第二个关键帧高亮框越界，四个开关只出现三个。请完善验收。",
+      "expected_output": "检查全部关键帧轨迹、图形碰撞、状态事件可见区间和required_indices；仅容器图不能证明正确。保留人工字形可读性、语义和声画同步复核，不把自动QA写为人工已通过。",
+      "files": []
+    },
+    {
+      "id": 17,
+      "name": "legacy-project-migration",
+      "prompt": "这个旧项目有 project.json 和 storyboard.json。我想升级到新的工程标准，但必须保留原文件、相对素材路径、镜头顺序、旁白覆盖和 Demo 选择。请迁移并验证，不要直接覆盖。",
+      "expected_output": "使用 migrate 在旧文件旁生成 kind=NarratedProject、version=1 的单文件工程；原文件保持不变，迁移前后镜头、旁白、素材、创作纲要和 Demo 语义等价。",
+      "files": []
+    },
+    {
+      "id": 18,
+      "name": "skill-runtime-boundary",
+      "prompt": "我要把 narrated-video Skill 发给同事。请打包 Skill，但不要把 README、测试、Kaggle 源码、Remotion node_modules、bundle cache 或本机路径一起带进去。",
+      "expected_output": "只从 skill/narrated-video 的显式发布源构建；包内仅含 SKILL.md、按需 references、薄 scripts/assets，并通过文件数、体积、禁止目录和引用完整性检查。",
       "files": []
     }
   ]

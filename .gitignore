@@ -9,6 +9,8 @@ kaggle/kernel-metadata.json
 .env
 .env.*
 renderers/remotion/node_modules/
+renderers/remotion/.bundle-cache/
+dist/
 *.log
 *.mp4
 *.wav

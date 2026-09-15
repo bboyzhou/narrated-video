@@ -1,8 +1,10 @@
 # narrated-video
 
-`narrated-video` 是一个面向 Codex 的图片运镜解说视频 skill。它把口播稿、图片、视频、配音、字幕和配乐组织为可审阅、可恢复、可局部重跑的项目，最终通过 Python + FFmpeg 输出 MP4。
+`narrated-video` 是图片/视频解说工程的运行时源码仓库。它把口播稿、图片、视频、配音、字幕和配乐组织为可审阅、可恢复、可局部重跑的 `NarratedProject v1`，再通过可替换 Adapter 输出 MP4 或可编辑时间线。
 
 它适合知识讲解、产品介绍、故事叙述、图文纪录和其他以旁白驱动的短视频；重点是稳定的内容生产流程，而不是完整替代非线性剪辑软件或生成式视频平台。
+
+可安装 Skill 位于 [`skill/narrated-video`](skill/narrated-video)。仓库不是 Skill 发布包；Remotion、Kaggle Worker、测试、evals、`node_modules` 和缓存不会随 Skill 安装。
 
 ## 当前能力
 
@@ -17,7 +19,7 @@
 - 使用本地图片或视频作为镜头，也可在单个镜头中叠加多个图片/视频图层。
 - 支持位置、缩放、旋转、透明度关键帧，以及常见推拉、平移、定格和转场效果。
 - 根据真实配音时长生成时间线，并将镜头、字幕和音频对齐。
-- 支持可选 Remotion Renderer Adapter：以统一 Render Plan 驱动 React 画面，音频混音仍由 FFmpeg 完成；Remotion 失败时可回退 FFmpeg。
+- 支持可选 Remotion Renderer Adapter：派生 Render Plan 驱动 React 画面，FFmpeg 混音；基础媒体允许显式降级，图形/视差/粒子等增强必须禁用降级以避免丢失。
 - 可查询离线素材库；网络素材需要 Agent 先核对来源与许可并下载到本地，渲染器本身不联网。
 
 ### 配音、字幕与声音
@@ -51,52 +53,45 @@
 
 ## 架构设计
 
-主链路将“内容意图”“执行策略”和“媒体渲染”分离。普通镜头直接进入确定性合成；只有分镜明确标记且处于预算内的 Hero Shot 才进入 I2V 分支。
+主链路将“知识编排”“工程协议”“生成 Provider”“执行计划”和“媒体 Adapter”分离。`NarratedProject v1` 是唯一持久化工程标准；RenderPlan 与 RuntimePlan 都是可重新生成的派生执行数据。
+
+协议归属、兼容策略和发布边界详见 [NarratedProject v1 architecture](doc/narrated-project-v1.md)。
 
 ```text
-用户输入 / 本地文档
-        │
-        ▼
-口播稿 → 制作纲要 → 完整分镜 → Demo
-  │                       │        │
-  └──────── 审批门禁与项目状态 ────┘
-                          │
-              ┌───────────┴───────────┐
-              ▼                       ▼
-      本地图片/视频/TTS          可选 I2V Orchestrator
-                                      │
-                          Profile + Provider + Runtime
-                                      │
-                               Hardware Detection
-                                      │
-                                RuntimePlan + Job
-                                      │
-                               Worker 执行与产物导入
-                                      │
-                         失败 → 本地素材/图片运镜回退
-              └───────────┬───────────┘
-                          ▼
-               时间线、字幕、配乐与图层合成
-                          │
-                 Remotion（可选）
-                         │
-                 FFmpeg（主链路/混音）
-                          │
-                          ▼
-                 校验、Demo 与最终交付物
+                 Agent
+                   │
+           narrated-video Skill
+                   │
+     ┌─────────────┼─────────────┐
+     ▼             ▼             ▼
+   Image           TTS           I2V
+  Provider       Provider      Provider
+     └─────────────┼─────────────┘
+                   ▼
+          NarratedProject v1
+          唯一持久化工程标准
+                   │
+            compile RenderPlan
+                   │
+       ┌───────────┼────────────┐
+       ▼           ▼            ▼
+    FFmpeg      Remotion    OpenChatCut
+    Adapter      Adapter      Adapter
 ```
 
 ### 分层职责
 
 | 层 | 主要职责 | 关键实现/协议 |
 | --- | --- | --- |
-| Skill 编排层 | 解释用户目标，安排审批、素材准备、Demo 和最终交付 | [`SKILL.md`](SKILL.md) |
-| 项目与状态层 | 保存配置、分镜、批准记录、阶段状态与缓存信息 | [`scripts/pipeline.py`](scripts/pipeline.py)、[`references/project.md`](references/project.md) |
+| Skill 编排层 | 解释用户目标，安排审批、素材准备、Demo 和最终交付 | [`skill/narrated-video/SKILL.md`](skill/narrated-video/SKILL.md) |
+| 工程协议层 | 保存唯一可编辑工程并兼容旧 project/storyboard | [`schemas/narrated-project-v1.schema.json`](schemas/narrated-project-v1.schema.json)、[`scripts/narrated_project/`](scripts/narrated_project/) |
+| 状态层 | 保存运行路径、批准记录、阶段状态与缓存信息 | `.narrated-video/` sidecar、[`scripts/pipeline.py`](scripts/pipeline.py) |
 | 内容合成层 | 将镜头、图层、关键帧、字幕与音频映射到统一时间线 | [`scripts/composition.py`](scripts/composition.py)、[`references/composition.md`](references/composition.md) |
 | I2V 控制层 | 选择 Provider/Runtime，探测硬件，生成 RuntimePlan，执行预算与回退策略 | [`scripts/runtime_planner.py`](scripts/runtime_planner.py)、[`scripts/generators/`](scripts/generators/) |
 | I2V 执行层 | 在目标 Runtime 中消费 Job 与 RuntimePlan，并返回标准化结果 | [`scripts/workers/`](scripts/workers/)、[`kaggle/`](kaggle/) |
 | 导入与校验层 | 校验缓存键、计划、哈希、分辨率、时长及完整解码，再登记生成资产 | [`scripts/import_generated_videos.py`](scripts/import_generated_videos.py) |
-| 渲染与交付层 | 使用 FFmpeg 合成 Demo/全片并检查最终媒体 | [`scripts/pipeline.py`](scripts/pipeline.py) |
+| Adapter 层 | 由同一 RenderPlan 输出 FFmpeg、Remotion 或 OpenChatCut 目标 | [`scripts/adapters/`](scripts/adapters/) |
+| 渲染与交付层 | 统一完成字幕、混音、封装和最终媒体检查 | [`scripts/pipeline.py`](scripts/pipeline.py) |
 
 ### I2V 核心约束
 
@@ -119,12 +114,14 @@ AI Mini Studio 的长期演进方向、阶段成熟度、验收标准和风险�
 
 ```text
 narrated-video/
-├── SKILL.md                 # skill 入口与工作流约束
-├── scripts/                 # 项目、合成、规划、导入和测试脚本
+├── skill/narrated-video/    # 唯一可安装 Skill 发行源
+├── scripts/                 # core、Adapter、规划、导入和测试脚本
+│   ├── narrated_project/    # NarratedProject loader、校验、迁移、编译
+│   ├── adapters/            # FFmpeg、Remotion、OpenChatCut Adapter
 │   ├── generators/          # Provider 能力与路由
 │   ├── runtimes/            # Runtime 注册与平台抽象
 │   └── workers/             # 标准 Worker 契约
-├── schemas/                 # Job、RuntimePlan、Provider Capability 等 Schema
+├── schemas/                 # NarratedProject、RenderPlan、Job、RuntimePlan Schema
 ├── references/              # 按需加载的详细规范
 ├── doc/                     # RoadMap 等项目级设计与规划文档
 ├── templates/               # 项目和测试计划模板
@@ -133,24 +130,32 @@ narrated-video/
 └── evals/                   # skill 行为评测场景
 ```
 
-## 使用
+## Skill 构建与安装
 
-将本目录作为 skill 使用，入口说明见 [SKILL.md](SKILL.md)。脚本命令和项目 JSON 见 [项目规范](references/project.md)，分镜规范见 [分镜规范](references/storyboard.md)；首次使用先阅读 [运行环境](references/runtime.md)，选择 Python、FFmpeg、NLTK 和模型缓存路径。
+不要把仓库根目录直接安装成 Skill。构建器只接受 `SKILL.md/references/scripts/assets`，并拒绝 README、依赖、缓存、测试输出和过大文件：
 
 ```powershell
-python scripts/pipeline.py init D:/videos/example/project.json --source D:/documents/source.md
-python scripts/pipeline.py paths D:/videos/example/project.json
-python scripts/pipeline.py configure D:/videos/example/project.json --python D:/tools/python.exe --ffmpeg D:/tools/ffmpeg.exe --offline true
-python scripts/pipeline.py preflight D:/videos/example/project.json
-python scripts/pipeline.py remember-runtime D:/videos/example/project.json
-python scripts/pipeline.py check D:/videos/example/project.json --stage script
-python scripts/pipeline.py record D:/videos/example/project.json --stage script --quote "用户实际批准回复"
-python scripts/pipeline.py check D:/videos/example/project.json
-python scripts/pipeline.py record D:/videos/example/project.json --stage storyboard --quote "用户实际批准回复"
-python scripts/pipeline.py video-prepare D:/videos/example/project.json --stage demo --ffmpeg PATH
+python scripts/build_skill.py --check
+python scripts/build_skill.py
+python scripts/sync_skill.py --target C:/path/to/skills/narrated-video --backup-root C:/path/to/backups
+```
+
+## Runtime 使用
+
+`init` 创建单文件 NarratedProject v1；旧工程用 `migrate` 输出新文件，原工程保持不变。
+
+```powershell
+python scripts/pipeline.py init D:/videos/example/narrated-project.json --source D:/documents/source.md
+python scripts/pipeline.py migrate D:/videos/old/project.json --output D:/videos/old/narrated-project.json
+python scripts/pipeline.py paths D:/videos/example/narrated-project.json
+python scripts/pipeline.py configure D:/videos/example/narrated-project.json --python D:/tools/python.exe --ffmpeg D:/tools/ffmpeg.exe --offline true
+python scripts/pipeline.py preflight D:/videos/example/narrated-project.json
+python scripts/pipeline.py check D:/videos/example/narrated-project.json --stage script
+python scripts/pipeline.py record D:/videos/example/narrated-project.json --stage script --quote "用户实际批准回复"
+python scripts/pipeline.py video-prepare D:/videos/example/narrated-project.json --stage demo --ffmpeg PATH
 # 在选择的 Runtime 中运行任务包并下载输出后：
-python scripts/pipeline.py video-import D:/videos/example/project.json --stage demo --results OUTPUT_ZIP --ffmpeg PATH
-python scripts/pipeline.py video-status D:/videos/example/project.json --stage demo --ffmpeg PATH
+python scripts/pipeline.py video-import D:/videos/example/narrated-project.json --stage demo --results OUTPUT_ZIP --ffmpeg PATH
+python scripts/pipeline.py adapter-export D:/videos/example/narrated-project.json --adapter openchatcut --stage full --output D:/videos/example/openchatcut-import.json
 ```
 
 `preflight` 必须在文案和制作方案前通过；`remember-runtime` 会把通过门禁的运行环境保存到用户级配置，供后续项目和 Agent 会话复用。两者都不会自动安装依赖或下载模型。

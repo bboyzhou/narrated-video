@@ -70,7 +70,7 @@ def resolve_paths(project, config, include_global=True, include_environment=True
         # Resource environment variables are inherited and injected below; do
         # not turn an unrelated stale cache variable into a strict path check.
         sources.append({key: value for key, value in environment_runtime().items()
-                        if key in ('python', 'ffmpeg')})
+                        if key in EXECUTABLE_KEYS})
     if include_global:
         sources.append(read_global_runtime())
     sources.append(config or {})

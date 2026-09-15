@@ -1,52 +1,30 @@
 import React from 'react';
-import {AbsoluteFill, Img, OffthreadVideo, interpolate, Easing, staticFile, useCurrentFrame} from 'remotion';
-
-type Plan = {
-  width: number; height: number; fps: number; total_frames: number;
-  shots: any[]; motion?: {max_zoom?: number; easing?: string};
+import {AbsoluteFill,Img,OffthreadVideo,Sequence,Loop,Freeze,staticFile,useCurrentFrame} from 'remotion';
+import {camera,layerState,clamp} from './animation.mjs';
+import {Graphic,Effects} from './graphics';
+type Plan={width:number;height:number;fps:number;total_frames:number;shots:any[];motion?:any};
+const Media:React.FC<{item:any;fps:number;style:React.CSSProperties}>=({item,fps,style})=>{
+  const frame=useCurrentFrame();
+  if(item.type!=='video')return <Img src={staticFile(item.asset)} style={style}/>;
+  const offset=Math.round((item.source_start||0)*fps),total=Math.max(1,Math.floor(item.source_duration*fps)),first=Math.max(1,total-offset);
+  const video=<OffthreadVideo src={staticFile(item.asset)} style={style} muted startFrom={offset}/>;
+  if(frame<first)return video;
+  if(item.loop)return <Sequence from={first}><Loop durationInFrames={total}><OffthreadVideo src={staticFile(item.asset)} style={style} muted/></Loop></Sequence>;
+  return <Freeze frame={first-1}>{video}</Freeze>;
 };
-
-const ease = Easing.inOut(Easing.ease);
-
-const mediaStyle = (shot: any, frame: number, plan: Plan): React.CSSProperties => {
-  const local = frame - shot.start_frame;
-  const maxZoom = plan.motion?.max_zoom ?? 0.06;
-  const progress = shot.duration_frames <= 1 ? 0 : local / (shot.duration_frames - 1);
-  const p = Math.max(0, Math.min(1, progress));
-  const eased = shot.motion === 'still' ? 0 : interpolate(p, [0, 1], [0, 1], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: ease});
-  let x = 0; let y = 0; let scale = 1;
-  if (shot.motion === 'push') scale = 1 + maxZoom * eased;
-  if (shot.motion === 'pull') scale = 1 + maxZoom * (1 - eased);
-  if (shot.motion === 'pan-left') x = maxZoom * (0.5 - eased);
-  if (shot.motion === 'pan-right') x = maxZoom * (eased - 0.5);
-  const fade = shot.transition_frames && local < shot.transition_frames
-    ? interpolate(local, [0, shot.transition_frames], [0, 1], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'}) : 1;
-  return {width: '100%', height: '100%', objectFit: 'cover', transform: `translate(${x * 100}%, ${y * 100}%) scale(${scale})`, opacity: fade};
-};
-
-const Layer: React.FC<{layer: any; frame: number}> = ({layer, frame}) => {
-  const local = frame - layer._shot_start - Math.round(layer.start * layer._fps);
-  const frames = Math.max(1, Math.round((layer.end - layer.start) * layer._fps));
-  const k = layer.keyframes ?? [];
-  const a = k.length ? k[0] : {x: 0.5, y: 0.5, scale: 1, rotation: 0, opacity: 1};
-  const b = k.length ? k[k.length - 1] : a;
-  const t = Math.max(0, Math.min(1, local / frames));
-  const value = (key: string) => interpolate(t, [0, 1], [a[key], b[key]], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'});
-  const style: React.CSSProperties = {position: 'absolute', left: `${value('x') * 100}%`, top: `${value('y') * 100}%`, width: `${(layer.width ?? 0.3) * 100}%`, height: `${(layer.height ?? 0.3) * 100}%`, objectFit: 'contain', transform: `translate(-50%, -50%) scale(${value('scale')}) rotate(${value('rotation')}deg)`, opacity: value('opacity')};
-  return layer.type === 'video' ? <OffthreadVideo src={staticFile(layer.asset)} style={style} muted /> : <Img src={staticFile(layer.asset)} style={style} />;
-};
-
-export const NarratedVideo: React.FC<Plan> = (plan) => {
-  const frame = useCurrentFrame();
-  return <AbsoluteFill style={{backgroundColor: 'black', overflow: 'hidden'}}>
-    {plan.shots.map((shot) => {
-      const visible = frame >= shot.start_frame && frame < shot.start_frame + shot.duration_frames;
-      if (!visible) return null;
-      const style = mediaStyle(shot, frame, plan);
-      const content = shot.type === 'video'
-        ? <OffthreadVideo src={staticFile(shot.asset)} style={style} muted startFrom={Math.round((shot.source_start ?? 0) * plan.fps)} loop={shot.loop ?? false} />
-        : <Img src={staticFile(shot.asset)} style={style} />;
-      return <AbsoluteFill key={shot.id}>{content}{shot.layers.map((layer: any) => <Layer key={layer.id} layer={{...layer, _shot_start: shot.start_frame, _fps: plan.fps}} frame={frame} />)}</AbsoluteFill>;
+const Shot:React.FC<{shot:any;plan:Plan}>=({shot,plan})=>{
+  const frame=useCurrentFrame(),cam=camera(shot.motion,frame,shot.duration_frames,plan.motion?.max_zoom,plan.motion?.easing);
+  const opacity=shot.incoming_transition_frames?clamp(frame/shot.incoming_transition_frames):1;
+  return <AbsoluteFill style={{opacity,overflow:'hidden'}}>
+    <Media item={shot} fps={plan.fps} style={{width:'100%',height:'100%',objectFit:'cover',transform:`translateX(${cam.x*100}%) scale(${cam.scale})`}}/>
+    {shot.layers.map((layer:any)=>{
+      const s=layerState(layer,frame/plan.fps);if(!s||frame>=shot.spoken_frames)return null;
+      return <Sequence key={layer.id} from={Math.ceil(layer.start*plan.fps)} durationInFrames={Math.max(1,Math.ceil(layer.end*plan.fps)-Math.ceil(layer.start*plan.fps))} layout="none">
+        <Media item={layer} fps={plan.fps} style={{position:'absolute',left:`${(s.x+cam.x*(layer.depth||0))*100}%`,top:`${s.y*100}%`,width:`${(layer.width??.3)*100}%`,height:`${(layer.height??.3)*100}%`,objectFit:'contain',transform:`translate(-50%,-50%) scale(${s.scale}) rotate(${s.rotation}deg)`,opacity:s.opacity}}/>
+      </Sequence>;
     })}
+    {(shot.graphics||[]).map((g:any)=><Graphic key={g.id} component={g} frame={frame} fps={plan.fps}/>)}
+    <Effects effects={shot.effects||{}} frame={frame} fps={plan.fps}/>
   </AbsoluteFill>;
 };
+export const NarratedVideo:React.FC<Plan>=plan=><AbsoluteFill style={{backgroundColor:'black',overflow:'hidden'}}>{plan.shots.map(shot=><Sequence key={shot.id} from={shot.start_frame} durationInFrames={shot.duration_frames}><Shot shot={shot} plan={plan}/></Sequence>)}</AbsoluteFill>;

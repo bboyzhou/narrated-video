@@ -13,6 +13,7 @@ from pathlib import Path
 
 from generators import build_video_job, file_sha256
 from generators.router import fallback_result
+from narrated_project import load_project
 
 
 LEGACY_PERFORMANCE_FIELDS = {
@@ -195,7 +196,8 @@ def import_generated_videos(project_path, results_path, jobs_path=None, ffprobe=
                             ffmpeg=None, output_dir='assets/generated-video'):
     project_path = Path(project_path).resolve()
     root = project_path.parent
-    config = read_json(project_path)
+    document = load_project(project_path)
+    config = document.legacy_view()
     shots = {shot['id']: shot for shot in config.get('shots', [])}
     results_path = Path(results_path).resolve()
     jobs_path = Path(jobs_path).resolve() if jobs_path else results_path.with_name('video_jobs.json')
@@ -304,9 +306,14 @@ def import_generated_videos(project_path, results_path, jobs_path=None, ffprobe=
             # The declared image/video shot remains the approved fallback. Rendering
             # resolves this generated asset only while its exact cache key is current.
             shots[shot_id]['generated_video'] = generated
+            if document.source_format == 'v1':
+                document.set_generated_video(shot_id, generated)
             index['entries'][cache_key] = {'id': shot_id, **generated}
             imported.append({'id': shot_id, **generated})
-        write_json(project_path, config)
+        if document.source_format == 'v1':
+            document.save()
+        else:
+            write_json(project_path, config)
         write_json(index_path, index)
         report = root / '.narrated-video' / 'generated-video-import.json'
         write_json(report, {'version': 3, 'provider': provider, 'imported': imported,

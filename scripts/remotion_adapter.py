@@ -7,7 +7,33 @@ import hashlib
 import json
 import shutil
 import subprocess
+import copy
 from pathlib import Path
+
+
+def preflight(runtime):
+    root = Path(__file__).resolve().parents[1] / 'renderers' / 'remotion'
+    try:
+        if not all(runtime.get(k) and Path(runtime[k]).is_file() for k in ('node', 'browser')):
+            raise ValueError('Select explicit existing runtime.node and runtime.browser')
+        expected = json.loads((root / 'package.json').read_text(encoding='utf-8'))['dependencies']
+        for name, version in expected.items():
+            actual = json.loads((root / 'node_modules' / name / 'package.json').read_text(encoding='utf-8'))['version']
+            if actual != version:
+                raise ValueError('Installed package version differs from pin: ' + name)
+        subprocess.run([runtime['node'], '--input-type=module', '-e',
+                        "import '@remotion/bundler'; import '@remotion/renderer'; import 'remotion';"],
+                       cwd=root, check=True, capture_output=True, timeout=30)
+        return {'ok': True, 'detail': 'Local packages and executable paths available; actual browser rendering still requires smoke'}
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        return {'ok': False, 'detail': str(error)}
+
+
+def renderer_identity():
+    root = Path(__file__).resolve().parents[1] / 'renderers' / 'remotion'
+    paths = [Path(__file__), Path(__file__).with_name('alignment.py')]
+    paths += [root / 'package-lock.json', *sorted((root / 'src').glob('*')), *sorted((root / 'scripts').glob('*.mjs'))]
+    return hashlib.sha256(''.join(_hash(p) for p in paths if p.is_file()).encode()).hexdigest()
 
 
 def _hash(path):
@@ -27,54 +53,24 @@ def _stage_asset(source, asset_root):
     return target.name
 
 
-def build_render_plan(project, stage, selected, voices, timeline):
-    """Build a renderer-neutral JSON plan and stage only referenced media."""
-    asset_root = project.work / 'remotion-assets'
+def prepare_plan(plan, context):
+    """Translate renderer-neutral absolute assets into a Remotion-local plan."""
+    value = copy.deepcopy(plan)
+    asset_root = context.work / 'remotion-assets'
     asset_root.mkdir(parents=True, exist_ok=True)
-    fps = project.fps
-    durations = [sum(voices[s]['frames'] for s in shot['narration']) for shot in selected]
-    tails = [round(shot.get('transition', 0.3) * fps) if i + 1 < len(selected) else 0
-             for i, shot in enumerate(selected)]
-    shots = []
-    cursor = 0
-    for i, shot in enumerate(selected):
-        visual_duration = durations[i] + tails[i]
-        item = {
-            'id': shot['id'],
-            'start_frame': cursor,
-            'duration_frames': visual_duration,
-            'spoken_frames': durations[i],
-            'transition_frames': tails[i],
-            'type': shot['type'],
-            'asset': _stage_asset(project.path_for(shot['asset']), asset_root),
-            'source_start': shot.get('source_start', 0),
-            'loop': shot.get('loop', False),
-            'motion': shot.get('motion', 'push'),
-            'layers': [],
-        }
+    for shot in value['shots']:
+        shot['asset'] = _stage_asset(shot['asset'], asset_root)
         for layer in shot.get('layers', []):
-            copy_layer = {k: layer[k] for k in ('id', 'type', 'start', 'end', 'width', 'height',
-                                                 'easing', 'keyframes') if k in layer}
-            copy_layer['asset'] = _stage_asset(project.path_for(layer['asset']), asset_root)
-            copy_layer['source_start'] = layer.get('source_start', 0)
-            copy_layer['loop'] = layer.get('loop', False)
-            item['layers'].append(copy_layer)
-        shots.append(item)
-        cursor += durations[i]
-    return {
-        'version': 1,
-        'stage': stage,
-        'fps': fps,
-        'width': project.output['width'],
-        'height': project.output['height'],
-        'total_frames': cursor,
-        'asset_root': str(asset_root),
-        'browser_executable': project.runtime.get('browser') or project.runtime.get('chrome'),
-        'motion': project.c.get('motion', {}),
-        'shots': shots,
-        'captions': timeline,
-        'subtitles': project.c.get('subtitles', {}),
-    }
+            layer['asset'] = _stage_asset(layer['asset'], asset_root)
+    value['asset_root'] = str(asset_root)
+    value['browser_executable'] = context.runtime.get('browser') or context.runtime.get('chrome')
+    return value
+
+
+def build_render_plan(project, stage, selected, voices, timeline):
+    """Backward-compatible helper returning the Remotion-prepared derived plan."""
+    from narrated_project.compiler import compile_render_plan
+    return prepare_plan(compile_render_plan(project, stage, selected, voices, timeline), project)
 
 
 def render(plan_path, output_path, node='node'):
@@ -87,10 +83,29 @@ def render(plan_path, output_path, node='node'):
     script = adapter_root / 'scripts' / 'render.mjs'
     command = [node, str(script), '--plan', str(plan_path), '--output', str(output_path)]
     completed = subprocess.run(command, cwd=str(adapter_root), text=True,
-                               capture_output=True, encoding='utf-8')
+                               capture_output=True, encoding='utf-8', timeout=1800)
     if completed.returncode:
+        qa_path = Path(str(plan_path).removesuffix('.json') + '-qa.json')
+        if qa_path.is_file():
+            qa = json.loads(qa_path.read_text(encoding='utf-8'))
+            if qa.get('status') == 'failed':
+                raise ValueError('Render plan QA failed: ' + '; '.join(qa.get('errors', [])))
         detail = (completed.stderr or completed.stdout).strip()
         raise RuntimeError('Remotion render failed: ' + detail[-2000:])
     if not Path(output_path).is_file():
         raise RuntimeError('Remotion did not produce output: ' + str(output_path))
     return Path(output_path)
+
+
+def validate_plan(plan_path, node='node'):
+    """Regenerate the QA report even when visual media is a valid cache hit."""
+    script = Path(__file__).resolve().parents[1] / 'renderers/remotion/scripts/render.mjs'
+    result = subprocess.run([node, str(script), '--plan', str(plan_path), '--validate-only'],
+                            capture_output=True, text=True, encoding='utf-8', timeout=120)
+    if result.returncode:
+        qa_path = Path(str(plan_path).removesuffix('.json') + '-qa.json')
+        if qa_path.is_file():
+            qa = json.loads(qa_path.read_text(encoding='utf-8'))
+            if qa.get('status') == 'failed':
+                raise ValueError('Render plan QA failed: ' + '; '.join(qa.get('errors', [])))
+        raise RuntimeError('Remotion validation unavailable: ' + (result.stderr or result.stdout)[-2000:])
