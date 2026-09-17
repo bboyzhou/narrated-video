@@ -79,6 +79,20 @@ def validate_project(data, stage='production'):
     require(i2v.get('profile', 'balanced') in PROFILES,
             'providers.i2v.profile must express only speed/quality/cost intent')
     _reject_i2v_execution_fields(i2v.get('providers', {}))
+    runtime = i2v.get('runtime')
+    runtime_name = runtime.get('type') if isinstance(runtime, dict) else runtime
+    if i2v.get('provider') == 'browser_i2v' or runtime_name == 'browser':
+        require(i2v.get('provider') == 'browser_i2v' and runtime_name == 'browser',
+                'Browser I2V requires provider=browser_i2v and runtime.type=browser')
+        browser = _object((i2v.get('providers') or {}).get('browser_i2v'),
+                          'providers.i2v.providers.browser_i2v')
+        platforms = _array(browser.get('platforms'),
+                           'providers.i2v.providers.browser_i2v.platforms')
+        supported = {'pixverse', 'jimeng', 'kling'}
+        require(len(platforms) == len(set(platforms)) and all(p in supported for p in platforms),
+                'browser_i2v.platforms contains duplicates or unsupported platforms')
+        require(browser.get('free_only') is True,
+                'browser_i2v.free_only must be true; paid usage requires a separate explicit workflow')
 
     render = _object(data.get('render'), 'render')
     target = _object(render.get('target'), 'render.target')

@@ -21,6 +21,7 @@ _LEGACY = {
 }
 
 PROVIDER_REGISTRY = {
+    'browser_i2v': {'type': 'i2v', 'tier': 'experimental', 'runtimes': ['browser']},
     'skyreels_v2': {'type': 'i2v', 'tier': 'experimental',
                     'runtimes': ['local', 'kaggle', 'runpod', 'remote_worker']},
     'wan22': {'type': 'i2v', 'tier': 'experimental',

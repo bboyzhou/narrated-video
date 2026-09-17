@@ -623,6 +623,15 @@ class Project:
         plan = self.storyboard_shots.get(shot['id'])
         if not plan or plan.get('asset_strategy') != 'generated_video':
             return None
+        from browser_i2v import browser_request_for_plan
+        from browser_i2v.manager import is_browser_plan
+        if is_browser_plan(plan, self.c):
+            request = browser_request_for_plan(plan, self.c, self.root)
+            return {'job': {'id': shot['id'], 'cache_key': request['digest']},
+                    'provider': 'browser_i2v',
+                    'provider_config': {'platforms': request['routing']['platforms'],
+                                        'free_only': True},
+                    'runtime_plan': None}
         source = self.path_for(plan['source_image'])
         job, provider_config, runtime_plan = build_video_job(
             plan, plan['source_image'], generated_file_sha256(source), self.c)
@@ -1449,7 +1458,9 @@ def main():
     parser.add_argument('command', choices=['init', 'migrate', 'paths', 'configure', 'remember-runtime',
                                             'doctor', 'preflight', 'check', 'record', 'tts',
                                             'render', 'verify', 'video-prepare', 'video-import',
-                                            'video-status', 'alignment-prepare', 'adapter-export'])
+                                            'video-status', 'alignment-prepare', 'adapter-export',
+                                            'i2v-plan', 'i2v-next', 'i2v-observe', 'i2v-status',
+                                            'i2v-sync'])
     parser.add_argument('project', help='Project JSON path')
     parser.add_argument('--source', help='Input .txt/.md or directory (init only)')
     parser.add_argument('--stage', choices=['script', 'storyboard', 'demo', 'full'], default='demo')
@@ -1464,6 +1475,7 @@ def main():
                         help='Editable-project adapter for adapter-export')
     parser.add_argument('--results', help='Generated output directory or ZIP for video-import')
     parser.add_argument('--jobs', help='video_jobs.json for video-import')
+    parser.add_argument('--observation', help='Browser observation JSON for i2v-observe')
     for option in ('python', 'node', 'browser', 'nltk-data', 'hf-home', 'hf-hub-cache', 'transformers-cache'):
         parser.add_argument('--' + option, help='User-selected path (configure only)')
     parser.add_argument('--offline', choices=['true', 'false'], help='Model cache offline mode (configure only)')
@@ -1528,7 +1540,30 @@ def main():
         return
     validation_stage = 'script' if args.stage == 'script' and args.command in ('check', 'record') else 'production'
     project = Project(args.project, args.ffmpeg, validation_stage)
-    if args.command == 'video-prepare':
+    if args.command == 'i2v-status':
+        from browser_i2v import status_report
+        print(json.dumps(status_report(project.path), ensure_ascii=False, indent=2))
+    elif args.command == 'i2v-observe':
+        require(args.observation, 'i2v-observe requires --observation')
+        from browser_i2v import observe_action
+        print(json.dumps(observe_action(project.path, args.observation), ensure_ascii=False, indent=2))
+    elif args.command == 'i2v-next':
+        require(args.stage in ('demo', 'full'), 'i2v-next stage must be demo or full')
+        project.gate(args.stage)
+        from browser_i2v import next_action
+        print(json.dumps(next_action(project.path), ensure_ascii=False, indent=2))
+    elif args.command == 'i2v-plan':
+        require(args.stage in ('demo', 'full'), 'i2v-plan stage must be demo or full')
+        project.gate(args.stage)
+        from browser_i2v import plan_tasks
+        print(json.dumps(plan_tasks(project, args.stage), ensure_ascii=False, indent=2))
+    elif args.command == 'i2v-sync':
+        require(args.stage in ('demo', 'full'), 'i2v-sync stage must be demo or full')
+        project.gate(args.stage)
+        from browser_i2v import sync_downloads
+        print(json.dumps(sync_downloads(project.path, args.ffprobe, project.ffmpeg),
+                         ensure_ascii=False, indent=2))
+    elif args.command == 'video-prepare':
         require(args.stage in ('demo', 'full'), 'video-prepare stage must be demo or full')
         project.gate(args.stage)
         from prepare_video_jobs import prepare_video_jobs

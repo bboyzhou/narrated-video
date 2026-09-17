@@ -94,6 +94,8 @@ def prepare_video_jobs(storyboard_path, project_path=None, stage='demo', output=
     require(len(providers) == 1,
             'A video job bundle must contain one provider; pass --provider to split the stage')
     selected_provider = next(iter(providers))
+    require(selected_provider != 'browser_i2v',
+            'browser_i2v uses pipeline.py i2v-plan/i2v-next instead of video-prepare')
 
     output = Path(output).resolve() if output else (
         project_root / '.narrated-video' / ('video-jobs-' + stage + '.json'))

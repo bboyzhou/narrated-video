@@ -178,12 +178,12 @@
         "profile": {"enum": ["smoke", "fast", "balanced", "quality", "max_quality"]},
         "runtime": {
           "oneOf": [
-            {"enum": ["auto", "local", "kaggle", "colab", "runpod", "remote_worker", "cloud_api"]},
+            {"enum": ["auto", "local", "kaggle", "colab", "runpod", "remote_worker", "cloud_api", "browser"]},
             {
               "type": "object",
               "required": ["type"],
               "properties": {
-                "type": {"enum": ["auto", "local", "kaggle", "colab", "runpod", "remote_worker", "cloud_api"]},
+                "type": {"enum": ["auto", "local", "kaggle", "colab", "runpod", "remote_worker", "cloud_api", "browser"]},
                 "hardware": {"type": "object"},
                 "overrides": {
                   "type": "object",

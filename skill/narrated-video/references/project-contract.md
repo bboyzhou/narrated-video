@@ -27,6 +27,10 @@ NarratedProject
 
 以下内容不属于工程协议：本机程序路径、密钥、审批记录、缓存、实际 GPU、I2V RuntimePlan、临时 RenderPlan 和验证日志。
 
+浏览器 I2V 使用 `providers.i2v.provider = "browser_i2v"` 和 `runtime.type = "browser"`。可移植配置只包含允许的平台顺序、`free_only`、查询间隔和尝试上限。远端任务、页面 URL、登录与验证码状态、额度快照、动作回执和下载暂存属于运行状态，保存在 `.narrated-video/i2v/`，不得写入 NarratedProject。
+
+浏览器生成结果验证通过后仍登记到镜头的 `generated_video`，其中记录请求摘要、素材哈希、实际平台、页面显示的模型名称和 `runtime: browser`。没有公开版本时保持未知，不编造模型版本或 RuntimePlan digest。原图片镜头继续作为回退。
+
 旧工程只读兼容；迁移时在原文件旁创建新文件以保持相对素材路径，禁止覆盖原文件：
 
 ```powershell

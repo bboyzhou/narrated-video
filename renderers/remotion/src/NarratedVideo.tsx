@@ -14,9 +14,14 @@ const Media:React.FC<{item:any;fps:number;style:React.CSSProperties}>=({item,fps
 };
 const Shot:React.FC<{shot:any;plan:Plan}>=({shot,plan})=>{
   const frame=useCurrentFrame(),cam=camera(shot.motion,frame,shot.duration_frames,plan.motion?.max_zoom,plan.motion?.easing);
-  const opacity=shot.incoming_transition_frames?clamp(frame/shot.incoming_transition_frames):1;
+  const incoming=shot.incoming_transition_frames||0;
+  const t=incoming?clamp(frame/incoming):1;
+  const style=shot.transition_style||'fade';
+  const opacity=style==='cut'?1:t;
+  const wipe=style==='wipe'?`inset(0 ${Math.max(0,(1-t)*100)}% 0 0)`:undefined;
+  const slide=style==='slide'?`${(1-t)*-8}%`:undefined;
   return <AbsoluteFill style={{opacity,overflow:'hidden'}}>
-    <Media item={shot} fps={plan.fps} style={{width:'100%',height:'100%',objectFit:'cover',transform:`translateX(${cam.x*100}%) scale(${cam.scale})`}}/>
+    <div style={{position:'absolute',inset:0,clipPath:wipe,transform:slide?`translateX(${slide})`:undefined}}><Media item={shot} fps={plan.fps} style={{width:'100%',height:'100%',objectFit:'cover',transform:`translateX(${cam.x*100}%) scale(${cam.scale})`}}/></div>
     {shot.layers.map((layer:any)=>{
       const s=layerState(layer,frame/plan.fps);if(!s||frame>=shot.spoken_frames)return null;
       return <Sequence key={layer.id} from={Math.ceil(layer.start*plan.fps)} durationInFrames={Math.max(1,Math.ceil(layer.end*plan.fps)-Math.ceil(layer.start*plan.fps))} layout="none">

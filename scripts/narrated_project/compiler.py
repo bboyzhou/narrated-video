@@ -47,6 +47,7 @@ def compile_render_plan(project, stage, selected, voices, timeline):
             'source_start': shot.get('source_start', 0),
             'loop': shot.get('loop', False),
             'motion': shot.get('motion', 'push'),
+            'transition_style': shot.get('transition_style', 'fade'),
             'layers': [],
             'graphics': copy.deepcopy(shot.get('graphics', [])),
             'effects': copy.deepcopy(shot.get('effects', {})),
